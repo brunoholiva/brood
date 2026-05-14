@@ -1,7 +1,5 @@
 """Taylor-Butina distance-based OOD splitter."""
 
-import warnings
-
 import numpy as np
 import pandas as pd
 from skfp.model_selection import butina_train_test_split
@@ -21,23 +19,21 @@ def _filter_and_score_test_set(
 ):
     """Filter test molecules by distance and calculate distance_to_train.
 
-    Uses sklearn Jaccard distance (= Tanimoto distance for binary vectors)
-    for pairwise computation.
+    Converts inputs to float64 once to avoid sklearn UserWarning on int
+    data. Uses Jaccard distance (= Tanimoto distance for binary vectors).
     """
     kept_smiles = []
     kept_targets = []
     mean_dists = []
 
+    train_fps_b = train_fps.astype(bool)
+
     for i, (smi, tgt) in enumerate(zip(test_smiles, test_targets)):
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                category=UserWarning,
-                module="sklearn.metrics.pairwise",
-            )
-            dists = pairwise_distances(
-                test_fps[i : i + 1], train_fps, metric="jaccard"
-            )[0]
+        dists = pairwise_distances(
+            test_fps[i : i + 1].astype(bool),
+            train_fps_b,
+            metric="jaccard",
+        )[0]
 
         min_dist = dists.min()
         if min_dist <= distance_cutoff:
