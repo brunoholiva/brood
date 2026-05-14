@@ -107,7 +107,8 @@ class TestDistanceValues:
             sims = BulkTanimotoSimilarity(test_fp, train_fps)
             distances = sorted([1.0 - s for s in sims])
             expected = np.mean(distances[:k])
-            assert test_df["distance_to_train"].iloc[0] == pytest.approx(expected)
+            actual = test_df["distance_to_train"].iloc[0]
+            assert actual == pytest.approx(expected)
 
 
 class TestDataIntegrity:
@@ -126,9 +127,8 @@ class TestDataIntegrity:
         original = diverse_df.set_index("standardized_smiles")
         for subset_df in (train_df, test_df):
             for _, row in subset_df.iterrows():
-                assert (
-                    row["target"] == original.loc[row["standardized_smiles"], "target"]
-                )
+                expected = original.loc[row["standardized_smiles"], "target"]
+                assert row["target"] == expected
 
     def test_total_count_preserved(self, diverse_df):
         """Total (train + test) does not exceed original size."""
@@ -162,9 +162,9 @@ class TestSimilarityFilter:
             test_fp = generator.GetFingerprint(Chem.MolFromSmiles(smi))
             sims = BulkTanimotoSimilarity(test_fp, train_fps)
             min_dist = 1.0 - max(sims)
-            assert (
-                min_dist > 0.2
-            ), f"{smi} has min distance {min_dist:.3f} <= 0.2 to training set"
+            assert min_dist > 0.2, (
+                f"{smi} has min distance {min_dist:.3f} <= 0.2 to training set"
+            )
 
     def test_filter_with_maximal_cutoff(self):
         """distance_cutoff=1.0 filters all test molecules."""
@@ -181,7 +181,14 @@ class TestSimilarityFilter:
         """distance_cutoff=0.0 (the minimum) applies no filtering."""
         df = pd.DataFrame(
             {
-                "standardized_smiles": ["CCO", "CCN", "CCC", "CCCl", "CCBr", "CCF"],
+                "standardized_smiles": [
+                    "CCO",
+                    "CCN",
+                    "CCC",
+                    "CCCl",
+                    "CCBr",
+                    "CCF",
+                ],
                 "target": [0, 0, 0, 1, 1, 0],
             }
         )
@@ -204,7 +211,9 @@ class TestDeterminism:
             train2["standardized_smiles"]
         )
         assert list(train1["target"]) == list(train2["target"])
-        assert list(test1["standardized_smiles"]) == list(test2["standardized_smiles"])
+        assert list(test1["standardized_smiles"]) == list(
+            test2["standardized_smiles"]
+        )
         assert list(test1["distance_to_train"]) == pytest.approx(
             list(test2["distance_to_train"])
         )
@@ -221,7 +230,9 @@ class TestInputValidation:
 
     def test_missing_target_column(self):
         """Raises KeyError when 'target' column is absent."""
-        df = pd.DataFrame({"standardized_smiles": ["CCO", "CCN"], "wrong": [0, 1]})
+        df = pd.DataFrame(
+            {"standardized_smiles": ["CCO", "CCN"], "wrong": [0, 1]}
+        )
         with pytest.raises(KeyError):
             taylor_butina_split(df)
 

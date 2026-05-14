@@ -1,58 +1,61 @@
 """Taylor-Butina distance-based OOD splitter."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from rdkit.DataStructs import BulkTanimotoSimilarity
 from skfp.model_selection import butina_train_test_split
+from sklearn.metrics.pairwise import pairwise_distances
 
-MORGAN_RADIUS = 2
-MORGAN_FP_SIZE = 2048
+from src.fingerprints import MorganFingerprintTransformer
+
 K_NEIGHBORS = 5
 
 
 def _generate_fingerprints(smiles_list):
-    generator = AllChem.GetMorganGenerator(
-        radius=MORGAN_RADIUS,
-        fpSize=MORGAN_FP_SIZE
-        )
-    fps = {}
-    for smiles in smiles_list:
-        mol = Chem.MolFromSmiles(smiles)
-        fps[smiles] = generator.GetFingerprint(mol)
-
-    return fps
+    return MorganFingerprintTransformer().transform(smiles_list)
 
 
 def _filter_and_score_test_set(
-    test_smiles, test_targets, smiles_to_fp, train_fps, distance_cutoff
+    test_smiles, test_targets, test_fps, train_fps, distance_cutoff
 ):
-    """Filter test molecules by distance and calculate distance_to_train."""
-    retained_test_data = []
+    """Filter test molecules by distance and calculate distance_to_train.
 
-    for smi, tgt in zip(test_smiles, test_targets):
-        test_fp = smiles_to_fp.get(smi)
-        if not test_fp:
+    Uses sklearn Jaccard distance (= Tanimoto distance for binary vectors)
+    for pairwise computation.
+    """
+    kept_smiles = []
+    kept_targets = []
+    mean_dists = []
+
+    for i, (smi, tgt) in enumerate(zip(test_smiles, test_targets)):
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=UserWarning,
+                module="sklearn.metrics.pairwise",
+            )
+            dists = pairwise_distances(
+                test_fps[i : i + 1], train_fps, metric="jaccard"
+            )[0]
+
+        min_dist = dists.min()
+        if min_dist <= distance_cutoff:
             continue
 
-        similarities = BulkTanimotoSimilarity(test_fp, train_fps)
+        kept_smiles.append(smi)
+        kept_targets.append(tgt)
+        k = min(K_NEIGHBORS, len(dists))
+        nearest = np.partition(dists, k - 1)[:k] if k < len(dists) else dists
+        mean_dists.append(nearest.mean())
 
-        distances = sorted([1.0 - s for s in similarities])
-
-        if distances[0] > distance_cutoff:
-            k = min(K_NEIGHBORS, len(distances))
-            mean_dist = np.mean(distances[:k])
-
-            retained_test_data.append(
-                {
-                    "standardized_smiles": smi,
-                    "target": tgt,
-                    "distance_to_train": mean_dist,
-                }
-            )
-
-    return retained_test_data
+    return pd.DataFrame(
+        {
+            "standardized_smiles": kept_smiles,
+            "target": kept_targets,
+            "distance_to_train": mean_dists,
+        }
+    )
 
 
 def taylor_butina_split(
@@ -102,29 +105,31 @@ def taylor_butina_split(
     smiles = df["standardized_smiles"].tolist()
     targets = df["target"].tolist()
 
-    train_smiles, test_smiles, train_targets, test_targets = butina_train_test_split(
-        smiles,
-        targets,
-        train_size=train_size,
-        test_size=test_size,
-        threshold=threshold,
-        approximate=approximate,
-        n_jobs=n_jobs,
+    train_smiles, test_smiles, train_targets, test_targets = (
+        butina_train_test_split(
+            smiles,
+            targets,
+            train_size=train_size,
+            test_size=test_size,
+            threshold=threshold,
+            approximate=approximate,
+            n_jobs=n_jobs,
+        )
     )
 
-    smiles_to_fp = _generate_fingerprints(smiles)
-    train_fps = [smiles_to_fp[s] for s in train_smiles]
+    fps = _generate_fingerprints(smiles)
+    smiles_to_idx = {s: i for i, s in enumerate(smiles)}
+    train_fps = fps[[smiles_to_idx[s] for s in train_smiles]]
+    test_fps = fps[[smiles_to_idx[s] for s in test_smiles]]
 
-    test_results = _filter_and_score_test_set(
-        test_smiles, test_targets, smiles_to_fp, train_fps, distance_cutoff
+    test_df = _filter_and_score_test_set(
+        test_smiles, test_targets, test_fps, train_fps, distance_cutoff
     )
-
     train_df = pd.DataFrame(
         {
             "standardized_smiles": train_smiles,
             "target": train_targets,
         }
     )
-    test_df = pd.DataFrame(test_results)
 
     return train_df, test_df
