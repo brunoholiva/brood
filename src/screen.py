@@ -11,24 +11,23 @@ from sklearn.pipeline import Pipeline
 from .evaluator import evaluate
 from .fingerprints import MorganFingerprintTransformer
 from .splitter import taylor_butina_split
-from .types import BinMetrics, RankingMetrics, ScreenResult
+from .types import (
+    BinMetrics,
+    ColumnConfig,
+    EvalConfig,
+    RankingMetrics,
+    ScreenResult,
+    SplitConfig,
+)
 
 
 def screen(
     df: pd.DataFrame,
     model,
-    smiles_col: str = "standardized_smiles",
-    target_col: str = "target",
-    score_col: str = "predicted_probability",
-    train_size: float = 0.8,
-    test_size: float = 0.2,
-    threshold: float = 0.65,
-    approximate: bool = True,
-    distance_cutoff: float = 0.2,
-    distance_bins: Optional[list] = None,
-    bedrock_alpha: float = 20.0,
+    column_config: Optional[ColumnConfig] = None,
+    split_config: Optional[SplitConfig] = None,
+    eval_config: Optional[EvalConfig] = None,
     random_state: Optional[int] = None,
-    n_jobs: Optional[int] = None,
 ) -> ScreenResult:
     """One-shot OOD evaluation: split -> train -> predict -> evaluate.
 
@@ -44,34 +43,18 @@ def screen(
         Any sklearn-compatible model. If it is not already a Pipeline, it
         will be auto-wrapped with MorganFingerprintTransformer. For non-
         sklearn models, use the modular API instead.
-    smiles_col : str, default="standardized_smiles"
-        Column with SMILES strings.
-    target_col : str, default="target"
-        Column with binary labels (0/1).
-    score_col : str, default="predicted_probability"
-        Column name for predicted probabilities in the output test_df.
-    train_size : float, default=0.8
-        Fraction of data for training.
-    test_size : float, default=0.2
-        Fraction of data for testing.
-    threshold : float, default=0.65
-        Tanimoto distance threshold for Taylor-Butina clustering.
-    approximate : bool, default=True
-        Use approximate similarity (NNDescent) for clustering.
-    distance_cutoff : float, default=0.2
-        Test molecules with min Tanimoto distance to training set at or
-        below this value are excluded.
-    distance_bins : list of (low, high, name), optional
-        Bins for per-bin evaluation. Defaults to near (0-0.3),
-        medium (0.3-0.6), far (0.6+).
-    bedrock_alpha : float, default=20.0
-        BEDROC early-enrichment parameter.
+    column_config : ColumnConfig, optional
+        Column name configuration. Defaults to ``ColumnConfig()``.
+    split_config : SplitConfig, optional
+        Split configuration (train_size, threshold, etc.).
+        Defaults to ``SplitConfig()``.
+    eval_config : EvalConfig, optional
+        Evaluation configuration (bins, bedrock_alpha).
+        Defaults to ``EvalConfig()``.
     random_state : int or None, optional
         Seed for reproducibility. Applied to the model if it has a
         ``random_state`` attribute. Not used by the splitter (Taylor-
         Butina is deterministic).
-    n_jobs : int or None, optional
-        Number of parallel jobs for the splitter.
 
     Returns
     -------
@@ -79,15 +62,19 @@ def screen(
         ``ScreenResult(global_=RankingMetrics, by_bin=[BinMetrics, ...],
         test_df=DataFrame, pipeline=Pipeline)``
     """
-    split_df = _validate_input(df, smiles_col, target_col)
+    col_cfg = column_config or ColumnConfig()
+    split_cfg = split_config or SplitConfig()
+    eval_cfg = eval_config or EvalConfig()
+
+    split_df = _validate_input(df, col_cfg.smiles_col, col_cfg.target_col)
     train_df, test_df = taylor_butina_split(
         split_df,
-        train_size=train_size,
-        test_size=test_size,
-        threshold=threshold,
-        approximate=approximate,
-        distance_cutoff=distance_cutoff,
-        n_jobs=n_jobs,
+        train_size=split_cfg.train_size,
+        test_size=split_cfg.test_size,
+        threshold=split_cfg.threshold,
+        approximate=split_cfg.approximate,
+        distance_cutoff=split_cfg.distance_cutoff,
+        n_jobs=split_cfg.n_jobs,
     )
 
     if len(test_df) == 0:
@@ -96,15 +83,15 @@ def screen(
 
     pipeline = _maybe_wrap_model(model, random_state)
     pipeline.fit(train_df["standardized_smiles"], train_df["target"])
-    _predict_scores(pipeline, train_df, test_df, score_col)
+    _predict_scores(pipeline, train_df, test_df, col_cfg.score_col)
 
     eval_result = evaluate(
         test_df,
-        score_col=score_col,
+        score_col=col_cfg.score_col,
         label_col="target",
         distance_col="distance_to_train",
-        bins=distance_bins,
-        bedrock_alpha=bedrock_alpha,
+        bins=eval_cfg.distance_bins,
+        bedrock_alpha=eval_cfg.bedrock_alpha,
     )
 
     return ScreenResult(

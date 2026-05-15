@@ -1,4 +1,4 @@
-"""Dataclasses for structured brood results."""
+"""Dataclasses for structured brood results and configuration."""
 
 from __future__ import annotations
 
@@ -7,6 +7,71 @@ from typing import Optional
 
 import pandas as pd
 from sklearn.pipeline import Pipeline
+
+
+@dataclass
+class ColumnConfig:
+    """Column name configuration for screening.
+
+    Attributes
+    ----------
+    smiles_col : str
+        Column with SMILES strings.
+    target_col : str
+        Column with binary labels (0/1).
+    score_col : str
+        Column name for predicted probabilities in the output.
+    """
+
+    smiles_col: str = "standardized_smiles"
+    target_col: str = "target"
+    score_col: str = "predicted_probability"
+
+
+@dataclass
+class SplitConfig:
+    """Taylor-Butina split configuration.
+
+    Attributes
+    ----------
+    train_size : float
+        Fraction of data for training.
+    test_size : float
+        Fraction of data for testing.
+    threshold : float
+        Tanimoto distance threshold for clustering.
+    approximate : bool
+        Use approximate similarity (NNDescent) for clustering.
+    distance_cutoff : float
+        Test molecules with min Tanimoto distance to training set
+        at or below this value are excluded.
+    n_jobs : int or None
+        Number of parallel jobs for the splitter.
+    """
+
+    train_size: float = 0.8
+    test_size: float = 0.2
+    threshold: float = 0.65
+    approximate: bool = True
+    distance_cutoff: float = 0.2
+    n_jobs: Optional[int] = None
+
+
+@dataclass
+class EvalConfig:
+    """Evaluation configuration.
+
+    Attributes
+    ----------
+    distance_bins : list of (low, high, name) or None
+        Distance bins for per-bin metrics. Defaults to near (0-0.3),
+        medium (0.3-0.6), far (0.6+).
+    bedrock_alpha : float
+        BEDROC early-enrichment parameter.
+    """
+
+    distance_bins: Optional[list] = None
+    bedrock_alpha: float = 20.0
 
 
 @dataclass
