@@ -5,7 +5,7 @@ import pandas as pd
 from skfp.model_selection import butina_train_test_split
 from sklearn.metrics.pairwise import pairwise_distances
 
-from src.fingerprints import MorganFingerprintTransformer
+from .fingerprints import MorganFingerprintTransformer
 
 K_NEIGHBORS = 5
 
