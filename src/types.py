@@ -116,8 +116,8 @@ class BinMetrics:
 
 
 @dataclass
-class ScreenResult:
-    """Full result of a brood screening experiment.
+class BroodResult:
+    """Full result of a brood experiment.
 
     Attributes
     ----------
