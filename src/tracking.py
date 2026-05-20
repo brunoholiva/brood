@@ -18,6 +18,7 @@ def log_experiment(
     split_cfg: Optional[SplitConfig] = None,
     eval_cfg: Optional[EvalConfig] = None,
     tags: Optional[dict] = None,
+    extra_params: Optional[dict] = None,
 ) -> None:
     """Log a brood screening experiment to MLflow.
 
@@ -33,6 +34,8 @@ def log_experiment(
         Evaluation configuration logged as parameters.
     tags : dict, optional
         Tags set on the MLflow run.
+    extra_params : dict, optional
+        Additional parameters to log (e.g. training set stats).
     """
     with mlflow.start_run(run_name=run_name):
         if tags:
@@ -53,6 +56,9 @@ def log_experiment(
                     params[f"eval_bin_{i}_low"] = lo
                     params[f"eval_bin_{i}_high"] = hi
             mlflow.log_params(params)
+
+        if extra_params:
+            mlflow.log_params(extra_params)
 
         mlflow.log_param("global_n", result.global_.n)
         mlflow.log_param("n_test", result.global_.n)
