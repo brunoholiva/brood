@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Batch split all datasets in ``data/`` into train/test.
+"""Batch split all datasets in ``data/raw/`` into train/test.
 
-Writes ``splits/<dataset>/{train,test_full,test_features}.csv`` for
-every CSV in the data directory.
+Writes ``data/splits/<dataset>_train.csv`` and
+``data/splits/<dataset>_test.csv`` for every CSV in the raw data
+directory.
 
 Usage
 -----
     python scripts/split_datasets.py
-    python scripts/split_datasets.py --data-dir data --splits-dir splits
 """
 
 from __future__ import annotations
@@ -17,11 +17,12 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from src.splitter import taylor_butina_split
+from src.splitter import taylor_butina_split  # noqa: E402
 
 TARGET_ALIASES = [
     "target",
@@ -65,15 +66,21 @@ def _split_csv(
     if smiles_col is None:
         smiles_col = _find_column(df, SMILES_ALIASES)
     if smiles_col is None:
-        print(f"  SKIP  {dataset}  — no SMILES column found.")
+        logger.warning(f"{dataset}: no SMILES column found, skipping")
         return
 
-    # find target column
     if target_col is None:
         target_col = _find_column(df, TARGET_ALIASES)
     if target_col is None:
-        print(f"  SKIP  {dataset}  — no target column found.")
+        logger.warning(f"{dataset}: no target column found, skipping")
         return
+
+    n_total = len(df)
+    n_total_actives = int(df[target_col].sum())
+    logger.info(
+        f"{dataset}: {n_total} molecules loaded, "
+        f"{n_total_actives} actives"
+    )
 
     df = df.rename(
         columns={target_col: "target", smiles_col: "standardized_smiles"}
@@ -83,35 +90,35 @@ def _split_csv(
     df = df.dropna(subset=["standardized_smiles"])
     dropped = before - len(df)
 
+    if dropped:
+        logger.info(f"{dataset}: {dropped} NaN SMILES dropped")
+
     if len(df) < 2:
-        print(f"  SKIP  {dataset}  — only {len(df)} rows after dropping NaN.")
+        logger.warning(
+            f"{dataset}: only {len(df)} rows after NaN drop, skipping"
+        )
         return
 
     try:
         train_df, test_df = taylor_butina_split(df)
     except Exception as e:
-        print(f"  FAIL  {dataset}  — {e}")
+        logger.error(f"{dataset}: split failed — {e}")
         return
 
-    out_dir = splits_dir / dataset
-    out_dir.mkdir(parents=True, exist_ok=True)
+    splits_dir.mkdir(parents=True, exist_ok=True)
 
-    train_df.to_csv(out_dir / "train.csv", index=False)
-    test_df.to_csv(out_dir / "test_full.csv", index=False)
-    test_df[["standardized_smiles", "distance_to_train"]].to_csv(
-        out_dir / "test_features.csv", index=False
-    )
+    train_df.to_csv(splits_dir / f"{dataset}_train.csv", index=False)
+    test_df.to_csv(splits_dir / f"{dataset}_test.csv", index=False)
 
     n_train = len(train_df)
     n_test = len(test_df)
-    n_actives = test_df["target"].sum()
-    msg = (
-        f"  OK    {dataset:<20}  train={n_train}  test={n_test}  "
-        f"actives={n_actives}"
+    n_train_actives = int(train_df["target"].sum())
+    n_test_actives = int(test_df["target"].sum())
+
+    logger.success(
+        f"{dataset}: train={n_train} ({n_train_actives} actives), "
+        f"test={n_test} ({n_test_actives} actives)"
     )
-    if dropped:
-        msg += f"  ({dropped} NaN dropped)"
-    print(msg)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -119,10 +126,14 @@ def _parse_args() -> argparse.Namespace:
         description="Batch split all datasets in data/."
     )
     parser.add_argument(
-        "--data-dir", default="data", help="Directory with dataset CSVs"
+        "--data-dir",
+        default="data/raw",
+        help="Directory with dataset CSVs (default: data/raw)",
     )
     parser.add_argument(
-        "--splits-dir", default="splits", help="Output directory for splits"
+        "--splits-dir",
+        default="data/splits",
+        help="Output directory for splits (default: data/splits)",
     )
     parser.add_argument(
         "--smiles-col", default=None, help="SMILES column name"
@@ -141,10 +152,10 @@ def main() -> None:
 
     csvs = sorted(data_dir.glob("*.csv"))
     if not csvs:
-        print(f"No CSVs found in {data_dir}/")
+        logger.warning(f"No CSVs found in {data_dir}/")
         return
 
-    print(f"Splitting {len(csvs)} dataset(s)...")
+    logger.info(f"Splitting {len(csvs)} dataset(s)...")
     for path in csvs:
         _split_csv(path, args.smiles_col, args.target_col, splits_dir)
 

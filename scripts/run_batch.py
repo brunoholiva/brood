@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
@@ -26,8 +27,8 @@ from src.byop import (  # noqa: E402
     load_predictions,
     merge_predictions,
 )
-from src.tracking import log_experiment
-from src.types import EvalConfig, SplitConfig 
+from src.tracking import log_experiment  # noqa: E402
+from src.types import EvalConfig, SplitConfig  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -80,20 +81,37 @@ def main() -> None:
         tags["dataset"] = dataset
 
     if not test_full_path.exists():
-        print(f"Error: test_full_path not found: {test_full_path}")
+        logger.error(f"test_full_path not found: {test_full_path}")
         sys.exit(1)
 
     test_df = pd.read_csv(test_full_path)
+    n_test_actives = int(test_df["target"].sum())
+    logger.info(f"{dataset}: evaluating {len(test_df)} test molecules "
+                f"({n_test_actives} actives)")
+
+    # Derive train split path from test path
+    test_path = Path(test_full_path)
+    if test_path.name.endswith("_test.csv"):
+        train_full_path = str(test_path).replace("_test.csv", "_train.csv")
+    else:
+        train_full_path = str(test_path.parent / "train.csv")
+
+    extra_params = {"n_test": len(test_df), "n_test_actives": n_test_actives}
+    if Path(train_full_path).exists():
+        train_df = pd.read_csv(train_full_path)
+        n_train_actives = int(train_df["target"].sum())
+        extra_params["n_train"] = len(train_df)
+        extra_params["n_train_actives"] = n_train_actives
 
     split_cfg = SplitConfig()
     eval_cfg = EvalConfig()
 
-    summary = []
+    results = []
     for run in manifest["runs"]:
         name = run["name"]
         preds_path = Path(run["predictions_path"])
         if not preds_path.exists():
-            print(f"  SKIP  {name}  — predictions not found: {preds_path}")
+            logger.warning(f"{name}: predictions not found at {preds_path}")
             continue
 
         run_tags = {**tags, "model": name}
@@ -104,6 +122,8 @@ def main() -> None:
             smiles_col=args.smiles_col,
             score_col=args.score_col,
         )
+        logger.info(f"{name}: {len(preds)} predictions loaded")
+
         merged = merge_predictions(
             test_df,
             preds,
@@ -112,8 +132,10 @@ def main() -> None:
         )
 
         if len(merged) == 0:
-            print(f"  SKIP  {name}  — no matching predictions.")
+            logger.warning(f"{name}: no matching test molecules, skipping")
             continue
+
+        logger.info(f"{name}: {len(merged)} test molecules matched")
 
         result = evaluate_predictions(
             merged,
@@ -128,18 +150,29 @@ def main() -> None:
             split_cfg=split_cfg,
             eval_cfg=eval_cfg,
             tags=run_tags,
+            extra_params=extra_params,
         )
 
         g = result.global_
-        summary.append(
-            f"  OK    {name:<20}  AP={g.average_precision:.4f}  "
+        results.append((name, g))
+
+        logger.success(
+            f"{name}  AP={g.average_precision:.4f}  "
             f"BEDROC={g.bedroc:.4f}  n={g.n}"
         )
 
-    if summary:
-        print("\nBatch complete.\n" + "\n".join(summary))
+    if results:
+        logger.info("─" * 50)
+        logger.info(f"{'model':<20} {'AP':<10} {'BEDROC':<10} {'n':<6}")
+        logger.info("─" * 50)
+        for name, g in results:
+            logger.info(
+                f"{name:<20} {g.average_precision:<10.4f} "
+                f"{g.bedroc:<10.4f} {g.n:<6}"
+            )
+        logger.info("─" * 50)
     else:
-        print("\nNo runs completed.")
+        logger.warning("No runs completed.")
 
 
 if __name__ == "__main__":
