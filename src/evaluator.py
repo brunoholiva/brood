@@ -67,6 +67,7 @@ def evaluate(
         )
         metrics["bin"] = name
         metrics["n"] = len(subset)
+        metrics["n_actives"] = int(subset[label_col].sum())
         by_bin.append(metrics)
 
     return {"global": global_metrics, "by_bin": by_bin}
@@ -95,6 +96,7 @@ def _empty_bin(name):
     return {
         "bin": name,
         "n": 0,
+        "n_actives": 0,
         "average_precision": float("nan"),
         "bedroc": float("nan"),
     }

@@ -103,6 +103,8 @@ class BinMetrics:
         Bin label (e.g. "near", "medium", "far").
     n : int
         Number of molecules in this bin.
+    n_actives : int
+        Number of active molecules in this bin.
     average_precision : float
         Average precision within this bin.
     bedroc : float
@@ -111,6 +113,7 @@ class BinMetrics:
 
     bin: str
     n: int
+    n_actives: int
     average_precision: float
     bedroc: float
 

@@ -69,6 +69,7 @@ def log_experiment(
 
         for b in result.by_bin:
             mlflow.log_param(f"bin_{b.bin}_n", b.n)
+            mlflow.log_param(f"bin_{b.bin}_n_actives", b.n_actives)
             mlflow.log_metric(
                 f"bin_{b.bin}_average_precision", b.average_precision
             )
