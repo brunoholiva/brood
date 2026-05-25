@@ -1,0 +1,22 @@
+name: brood
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11.15
+  - rdkit=2025.9.3
+  - numpy=2.4.4
+  - pandas=2.3.3
+  - scikit-learn=1.8.0
+  - scipy=1.17.1
+  - scikit-fingerprints=2.0.0
+  - tqdm=4.67.3
+  - loguru=0.7.3
+  - mlflow=3.12.0
+  - optuna=4.8.0
+  - ruff=0.15.12
+  - pytest=9.0.3
+  - docformatter=1.7.8
+  - pip
+  - pip:
+    - pynndescent
