@@ -42,9 +42,6 @@ class SplitConfig:
         Tanimoto distance threshold for clustering.
     approximate : bool
         Use approximate similarity (NNDescent) for clustering.
-    distance_cutoff : float
-        Test molecules with min Tanimoto distance to training set
-        at or below this value are excluded.
     n_jobs : int or None
         Number of parallel jobs for the splitter.
     """
@@ -53,7 +50,6 @@ class SplitConfig:
     test_size: float = 0.2
     threshold: float = 0.65
     approximate: bool = True
-    distance_cutoff: float = 0.2
     n_jobs: Optional[int] = None
 
 

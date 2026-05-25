@@ -137,63 +137,10 @@ class TestDataIntegrity:
         assert total <= len(diverse_df)
 
     def test_without_removed_molecules(self, diverse_df):
-        """Test set count reflects filtering but no data is lost for train."""
+        """No molecules are lost from the split (train + test <= original)."""
         train_df, test_df = taylor_butina_split(diverse_df)
         combined = pd.concat([train_df, test_df], ignore_index=True)
         assert len(combined) <= len(diverse_df)
-
-
-class TestSimilarityFilter:
-    """Verify the distance_cutoff filter removes near-duplicates."""
-
-    def test_no_test_molecule_too_close_to_train(self, diverse_df):
-        """Every retained test molecule has min distance > 0.2 to train."""
-        train_df, test_df = taylor_butina_split(diverse_df)
-        if len(test_df) == 0:
-            pytest.skip("empty test set, nothing to check")
-
-        generator = AllChem.GetMorganGenerator(radius=2, fpSize=2048)
-        train_fps = [
-            generator.GetFingerprint(Chem.MolFromSmiles(s))
-            for s in train_df["standardized_smiles"]
-        ]
-
-        for smi in test_df["standardized_smiles"]:
-            test_fp = generator.GetFingerprint(Chem.MolFromSmiles(smi))
-            sims = BulkTanimotoSimilarity(test_fp, train_fps)
-            min_dist = 1.0 - max(sims)
-            assert min_dist > 0.2, (
-                f"{smi} has min distance {min_dist:.3f} <= 0.2 to training set"
-            )
-
-    def test_filter_with_maximal_cutoff(self):
-        """distance_cutoff=1.0 filters all test molecules."""
-        df = pd.DataFrame(
-            {
-                "standardized_smiles": ["CCO", "CCN", "CCC", "CCCl"],
-                "target": [0, 0, 0, 1],
-            }
-        )
-        _, test_df = taylor_butina_split(df, distance_cutoff=1.0)
-        assert len(test_df) == 0
-
-    def test_filter_without_cutoff(self):
-        """distance_cutoff=0.0 (the minimum) applies no filtering."""
-        df = pd.DataFrame(
-            {
-                "standardized_smiles": [
-                    "CCO",
-                    "CCN",
-                    "CCC",
-                    "CCCl",
-                    "CCBr",
-                    "CCF",
-                ],
-                "target": [0, 0, 0, 1, 1, 0],
-            }
-        )
-        train_df, test_df = taylor_butina_split(df, distance_cutoff=0.0)
-        assert len(train_df) + len(test_df) == len(df)
 
 
 class TestDeterminism:

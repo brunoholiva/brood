@@ -23,33 +23,23 @@ def _generate_fingerprints(smiles_list):
     return MorganFingerprintTransformer().transform(smiles_list)
 
 
-def _filter_and_score_batch(
-    batch_fps, batch_smiles, batch_targets, train_fps, distance_cutoff
-):
-    """Filter one batch of test molecules and compute distance_to_train."""
+def _score_batch(batch_fps, batch_smiles, batch_targets, train_fps):
+    """Score one batch of test molecules and compute distance_to_train."""
     dists = pairwise_distances(
         batch_fps, train_fps, metric="jaccard", n_jobs=-1
     )
-    min_dists = dists.min(axis=1)
-    keep = min_dists > distance_cutoff
 
-    kept_smiles = [s for s, ok in zip(batch_smiles, keep) if ok]
-    kept_targets = [t for t, ok in zip(batch_targets, keep) if ok]
-
-    kept_dists = dists[keep]
-    k = min(K_NEIGHBORS, kept_dists.shape[1]) if kept_dists.ndim == 2 else 0
+    k = min(K_NEIGHBORS, dists.shape[1])
     mean_dists = []
-    for row in kept_dists:
+    for row in dists:
         nearest = np.partition(row, k - 1)[:k] if k < len(row) else row
         mean_dists.append(nearest.mean())
 
-    return kept_smiles, kept_targets, mean_dists
+    return batch_smiles, batch_targets, mean_dists
 
 
-def _filter_and_score_test_set(
-    test_smiles, test_targets, test_fps, train_fps, distance_cutoff
-):
-    """Filter test molecules by distance and calculate distance_to_train.
+def _score_test_set(test_smiles, test_targets, test_fps, train_fps):
+    """Score test molecules and calculate distance_to_train.
 
     Processes test molecules in batches to control memory usage.
     """
@@ -60,7 +50,7 @@ def _filter_and_score_test_set(
 
     for start in tqdm(
         range(0, n_test, BATCH_SIZE),
-        desc="Filtering test molecules",
+        desc="Scoring test molecules",
         unit="batch",
     ):
         end = min(start + BATCH_SIZE, n_test)
@@ -68,12 +58,10 @@ def _filter_and_score_test_set(
         smi = test_smiles[start:end]
         tgt = test_targets[start:end]
 
-        kept_s, kept_t, kept_d = _filter_and_score_batch(
-            fps, smi, tgt, train_fps, distance_cutoff
-        )
-        all_smiles.extend(kept_s)
-        all_targets.extend(kept_t)
-        all_dists.extend(kept_d)
+        s, t, d = _score_batch(fps, smi, tgt, train_fps)
+        all_smiles.extend(s)
+        all_targets.extend(t)
+        all_dists.extend(d)
 
     return pd.DataFrame(
         {
@@ -90,16 +78,14 @@ def taylor_butina_split(
     test_size=0.2,
     threshold=0.65,
     approximate=True,
-    distance_cutoff=0.2,
     n_jobs=None,
 ):
     """Split molecules into train/test using Taylor-Butina clustering.
 
     Molecules are clustered by scaffold similarity. The smallest clusters
-    (most novel scaffolds) form the test set. Test molecules too similar
-    to any training molecule (Tanimoto distance <= distance_cutoff) are
-    excluded, and each retained test molecule gets a `distance_to_train`
-    score (mean 5-NN Tanimoto distance to the training set).
+    (most novel scaffolds) form the test set. Each test molecule gets a
+    `distance_to_train` score (mean 5-NN Tanimoto distance to the
+    training set).
 
     Parameters
     ----------
@@ -114,9 +100,6 @@ def taylor_butina_split(
     approximate : bool, optional
         Use approximate similarity (NNDescent) for clustering. Falls
         back to exact for datasets under 5000 molecules.
-    distance_cutoff : float, optional
-        Test molecules with minimum Tanimoto distance to the training
-        set at or below this value are removed from the test set.
     n_jobs : int or None, optional
         Number of parallel jobs.
 
@@ -153,15 +136,9 @@ def taylor_butina_split(
     train_fps = fps[[smiles_to_idx[s] for s in train_smiles]]
     test_fps = fps[[smiles_to_idx[s] for s in test_smiles]]
 
-    logger.info(
-        f"Filtering test set (distance_cutoff={distance_cutoff})..."
-    )
-    test_df = _filter_and_score_test_set(
-        test_smiles, test_targets, test_fps, train_fps, distance_cutoff
-    )
-    logger.info(
-        f"Filtering done: {len(test_df)} test molecules retained"
-    )
+    logger.info("Scoring test set by distance to training set...")
+    test_df = _score_test_set(test_smiles, test_targets, test_fps, train_fps)
+    logger.info(f"Scoring done: {len(test_df)} test molecules")
 
     train_df = pd.DataFrame(
         {

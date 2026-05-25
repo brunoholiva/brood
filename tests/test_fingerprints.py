@@ -114,7 +114,7 @@ class TestPipeline:
                 "target": [0, 0, 0, 1, 1, 1, 0, 0, 1, 0],
             }
         )
-        train_df, test_df = taylor_butina_split(df, distance_cutoff=0.0)
+        train_df, test_df = taylor_butina_split(df)
 
         pipe = Pipeline(
             [
