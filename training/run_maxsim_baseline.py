@@ -24,7 +24,7 @@ from tqdm import tqdm
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from src.fingerprints import MorganFingerprintTransformer  # noqa: E402
+from src.fingerprints import MorganFingerprintTransformer
 
 BATCH_SIZE = 5000
 

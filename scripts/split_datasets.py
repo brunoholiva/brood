@@ -22,7 +22,7 @@ from loguru import logger
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from src.splitter import taylor_butina_split  # noqa: E402
+from src.splitter import taylor_butina_split
 
 TARGET_ALIASES = [
     "target",
@@ -78,8 +78,7 @@ def _split_csv(
     n_total = len(df)
     n_total_actives = int(df[target_col].sum())
     logger.info(
-        f"{dataset}: {n_total} molecules loaded, "
-        f"{n_total_actives} actives"
+        f"{dataset}: {n_total} molecules loaded, {n_total_actives} actives"
     )
 
     df = df.rename(

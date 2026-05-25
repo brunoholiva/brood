@@ -19,9 +19,7 @@ def load_predictions(
     preds = pd.read_csv(path)
     missing = [c for c in (smiles_col, score_col) if c not in preds.columns]
     if missing:
-        raise KeyError(
-            f"Missing required columns in {path}: {missing}"
-        )
+        raise KeyError(f"Missing required columns in {path}: {missing}")
     return preds
 
 

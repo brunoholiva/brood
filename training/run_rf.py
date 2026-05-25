@@ -27,24 +27,24 @@ from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import Pipeline
 
-warnings.filterwarnings(
-    "ignore", message="k=.* is greater than n_features=.*"
-)
+warnings.filterwarnings("ignore", message="k=.* is greater than n_features=.*")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from src.fingerprints import MorganFingerprintTransformer  # noqa: E402
+from src.fingerprints import MorganFingerprintTransformer
 
 
 def _build_pipeline(**kwargs) -> Pipeline:
     """Build an RF pipeline with feature selection."""
-    return Pipeline([
-        ("fps", MorganFingerprintTransformer()),
-        ("var", VarianceThreshold()),
-        ("kbest", SelectKBest(f_classif)),
-        ("rf", RandomForestClassifier(random_state=42)),
-    ]).set_params(**kwargs)
+    return Pipeline(
+        [
+            ("fps", MorganFingerprintTransformer()),
+            ("var", VarianceThreshold()),
+            ("kbest", SelectKBest(f_classif)),
+            ("rf", RandomForestClassifier(random_state=42)),
+        ]
+    ).set_params(**kwargs)
 
 
 def _default_params() -> dict:
@@ -61,13 +61,9 @@ def _default_params() -> dict:
 def _objective(trial, smiles, targets) -> float:
     """Optuna objective: mean 5-fold CV AP."""
     params = {
-        "var__threshold": trial.suggest_float(
-            "var__threshold", 0.0, 0.05
-        ),
+        "var__threshold": trial.suggest_float("var__threshold", 0.0, 0.05),
         "kbest__k": trial.suggest_int("kbest__k", 100, 2048, step=100),
-        "rf__n_estimators": trial.suggest_int(
-            "rf__n_estimators", 50, 500
-        ),
+        "rf__n_estimators": trial.suggest_int("rf__n_estimators", 50, 500),
         "rf__max_depth": trial.suggest_int("rf__max_depth", 3, 30),
         "rf__min_samples_split": trial.suggest_int(
             "rf__min_samples_split", 2, 20
@@ -103,9 +99,7 @@ def _load_data(
     logger.info(
         f"{dataset}: train={len(train_df)} ({n_train_actives} actives)"
     )
-    logger.info(
-        f"{dataset}: test={len(test_df)} ({n_test_actives} actives)"
-    )
+    logger.info(f"{dataset}: test={len(test_df)} ({n_test_actives} actives)")
 
     return train_df, test_df
 
@@ -132,15 +126,11 @@ def _run_tuning(
     for k, v in best_params.items():
         logger.info(f"  {k}: {v}")
 
-    with mlflow.start_run(
-        run_name=f"tuning/rf/{dataset}", nested=False
-    ):
+    with mlflow.start_run(run_name=f"tuning/rf/{dataset}", nested=False):
         mlflow.log_params(best_params)
         mlflow.log_metric("best_cv_average_precision", best_cv_ap)
         mlflow.log_param("n_trials", n_trials)
-        mlflow.set_tags(
-            {"dataset": dataset, "model": "rf", "stage": "tuning"}
-        )
+        mlflow.set_tags({"dataset": dataset, "model": "rf", "stage": "tuning"})
 
     return best_params
 
@@ -153,10 +143,12 @@ def _train_and_predict(
     logger.info("Training final model...")
     pipe.fit(train_smiles, train_targets)
 
-    return pd.DataFrame({
-        "standardized_smiles": test_smiles,
-        "predicted_probability": pipe.predict_proba(test_smiles)[:, 1],
-    })
+    return pd.DataFrame(
+        {
+            "standardized_smiles": test_smiles,
+            "predicted_probability": pipe.predict_proba(test_smiles)[:, 1],
+        }
+    )
 
 
 def _save_predictions(
@@ -233,9 +225,7 @@ def main() -> None:
         params,
     )
 
-    _save_predictions(
-        preds, data_dir / "predictions" / dataset, "rf.csv"
-    )
+    _save_predictions(preds, data_dir / "predictions" / dataset, "rf.csv")
 
 
 if __name__ == "__main__":

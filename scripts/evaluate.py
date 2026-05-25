@@ -6,7 +6,7 @@ model runs against a single dataset split.
 
 Usage
 -----
-    python scripts/run_batch.py file.json
+    python scripts/evaluate.py file.json
 """
 
 from __future__ import annotations
@@ -22,13 +22,13 @@ from loguru import logger
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from src.byop import (  # noqa: E402
+from src.byop import (
     evaluate_predictions,
     load_predictions,
     merge_predictions,
 )
-from src.tracking import log_experiment  # noqa: E402
-from src.types import EvalConfig, SplitConfig  # noqa: E402
+from src.tracking import log_experiment
+from src.types import EvalConfig, SplitConfig
 
 
 def _parse_args() -> argparse.Namespace:
@@ -86,8 +86,10 @@ def main() -> None:
 
     test_df = pd.read_csv(test_full_path)
     n_test_actives = int(test_df["target"].sum())
-    logger.info(f"{dataset}: evaluating {len(test_df)} test molecules "
-                f"({n_test_actives} actives)")
+    logger.info(
+        f"{dataset}: evaluating {len(test_df)} test molecules "
+        f"({n_test_actives} actives)"
+    )
 
     # Derive train split path from test path
     test_path = Path(test_full_path)
