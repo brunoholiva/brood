@@ -7,7 +7,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.DataStructs import BulkTanimotoSimilarity
 
-from src.splitter import taylor_butina_split
+from src.splitter import butina_cluster, taylor_butina_split
 
 DIVERSE_SMILES = [
     "CCO",
@@ -59,9 +59,14 @@ class TestColumns:
         assert "distance_to_train" in test_df.columns
 
     def test_train_set_no_distance_column(self, diverse_df):
-        """Train set only has original columns."""
+        """Train set does not have distance_to_train column.
+
+        (But it does have cluster_id, which is now included in both
+        train and test outputs.)
+        """
         train_df, _ = taylor_butina_split(diverse_df)
-        assert set(train_df.columns) == {"standardized_smiles", "target"}
+        assert "distance_to_train" not in train_df.columns
+        assert "cluster_id" in train_df.columns
 
     def test_test_set_has_all_original_columns(self, diverse_df):
         """Test set retains all original columns."""
@@ -188,3 +193,102 @@ class TestInputValidation:
         df = pd.DataFrame({"standardized_smiles": [], "target": []})
         with pytest.raises(ValueError):
             taylor_butina_split(df)
+
+
+SIMILAR_SMILES = [
+    "c1ccccc1",
+    "c1ccccc1C",
+    "c1ccccc1CC",
+    "c1ccccc1O",
+]
+
+
+class TestButinaCluster:
+    """Tests for the standalone butina_cluster() function."""
+
+    def test_returns_integer_array(self):
+        """Returns numpy array of integer cluster IDs."""
+        cluster_ids = butina_cluster(SIMILAR_SMILES)
+        assert isinstance(cluster_ids, np.ndarray)
+        assert cluster_ids.dtype.kind in ("i", "u")
+        assert len(cluster_ids) == 4
+
+    def test_similar_molecules_share_cluster(self):
+        """Similar molecules (benzene derivatives) go to same cluster.
+
+        Uses a loose threshold so similar compounds cluster together.
+        """
+        cluster_ids = butina_cluster(SIMILAR_SMILES, threshold=0.8)
+        assert len(set(cluster_ids)) == 1
+
+    def test_diverse_molecules_form_multiple_clusters(self):
+        """Diverse set of molecules form multiple clusters."""
+        cluster_ids = butina_cluster(DIVERSE_SMILES, threshold=0.3)
+        assert len(set(cluster_ids)) > 1
+
+    def test_deterministic_clustering(self):
+        """Same SMILES produce same cluster IDs."""
+        c1 = butina_cluster(DIVERSE_SMILES)
+        c2 = butina_cluster(DIVERSE_SMILES)
+        np.testing.assert_array_equal(c1, c2)
+
+    def test_invalid_smiles_raises(self):
+        """Invalid SMILES raises ValueError."""
+        with pytest.raises(ValueError):
+            butina_cluster(["CCO", "invalid_smiles_123"])
+
+    def test_empty_list_returns_empty(self):
+        """Empty input returns empty array."""
+        result = butina_cluster([])
+        assert isinstance(result, np.ndarray)
+        assert len(result) == 0
+
+    def test_single_molecule_single_cluster(self):
+        """One molecule returns cluster ID 0."""
+        result = butina_cluster(["CCO"])
+        assert list(result) == [0]
+
+
+class TestClusterIdIntegrity:
+    """Test cluster_id column behavior in split outputs."""
+
+    def test_train_has_cluster_id(self, diverse_df):
+        """Train DataFrame has cluster_id column."""
+        train_df, _ = taylor_butina_split(diverse_df)
+        assert "cluster_id" in train_df.columns
+
+    def test_test_has_cluster_id(self, diverse_df):
+        """Test DataFrame has cluster_id column."""
+        _, test_df = taylor_butina_split(diverse_df)
+        assert "cluster_id" in test_df.columns
+
+    def test_no_cluster_overlap_between_train_test(self, diverse_df):
+        """No cluster appears in both train and test sets.
+
+        This is critical for OOD evaluation: molecules from the same
+        scaffold cluster should not appear in both training and test.
+        """
+        train_df, test_df = taylor_butina_split(diverse_df)
+        train_clusters = set(train_df["cluster_id"])
+        test_clusters = set(test_df["cluster_id"])
+        assert train_clusters.isdisjoint(test_clusters)
+
+    def test_cluster_ids_preserved(self, diverse_df):
+        """Molecules keep their cluster IDs in split outputs."""
+        full_smiles = diverse_df["standardized_smiles"].tolist()
+        full_cluster_ids = butina_cluster(full_smiles)
+        smiles_to_cluster = dict(zip(full_smiles, full_cluster_ids))
+
+        train_df, test_df = taylor_butina_split(diverse_df)
+
+        for _, row in train_df.iterrows():
+            assert (
+                smiles_to_cluster[row["standardized_smiles"]]
+                == row["cluster_id"]
+            )
+
+        for _, row in test_df.iterrows():
+            assert (
+                smiles_to_cluster[row["standardized_smiles"]]
+                == row["cluster_id"]
+            )
