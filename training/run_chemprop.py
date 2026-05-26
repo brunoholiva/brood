@@ -13,19 +13,17 @@ Usage
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
-import mlflow
 import numpy as np
-import optuna
 import pandas as pd
 import torch
 from lightning import pytorch as pl
 from loguru import logger
 from rdkit import Chem, RDLogger
 from sklearn.metrics import average_precision_score
+from sklearn.model_selection import GroupKFold
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
@@ -40,6 +38,14 @@ from chemprop.nn.agg import MeanAggregation
 from chemprop.nn.message_passing import AtomMessagePassing
 from chemprop.nn.metrics import BinaryAUPRC
 from chemprop.nn.predictors import BinaryClassificationFFN
+
+from src.splitter import split_by_clusters
+from src.training_utils import (
+    load_split_data,
+    parse_training_args,
+    run_optuna_tuning,
+    save_predictions,
+)
 
 RDLogger.logger().setLevel(RDLogger.ERROR)
 
@@ -101,11 +107,32 @@ def _train_model(
     val_loader,
     epochs: int,
     checkpoint_dir: Path | None = None,
+    restore_best_weights: bool = True,
 ) -> pl.Trainer:
-    """Train an MPNN with Lightning and return the trainer."""
+    """Train an MPNN with Lightning and return the trainer.
+
+    Parameters
+    ----------
+    model : MPNN
+        The model to train.
+    train_loader : DataLoader
+        Training data loader.
+    val_loader : DataLoader
+        Validation data loader.
+    epochs : int
+        Maximum number of epochs.
+    checkpoint_dir : Path | None
+        Directory for model checkpoints (if any).
+    restore_best_weights : bool
+        If True, restore weights from best val_loss epoch when early stopping.
+        If False, keep weights from last training epoch.
+    """
     callbacks = [
         pl.callbacks.EarlyStopping(
-            monitor="val_loss", patience=10, mode="min"
+            monitor="val_loss",
+            patience=10,
+            mode="min",
+            restore_best_weights=restore_best_weights,
         ),
     ]
     if checkpoint_dir is not None:
@@ -147,38 +174,15 @@ def _predict(model: MPNN, test_loader) -> np.ndarray:
     return torch.cat(outputs).squeeze().numpy()
 
 
-def _load_data(
-    train_path: Path, test_path: Path, dataset: str
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load and validate train/test CSVs."""
-    if not train_path.exists():
-        logger.error(f"{train_path} not found. Run split_datasets.py first.")
-        sys.exit(1)
-    if not test_path.exists():
-        logger.error(f"{test_path} not found. Run split_datasets.py first.")
-        sys.exit(1)
-
-    train_df = pd.read_csv(train_path)
-    test_df = pd.read_csv(test_path)
-
-    n_train_actives = int(train_df["target"].sum())
-    n_test_actives = int(test_df["target"].sum())
-
-    logger.info(
-        f"{dataset}: train={len(train_df)} ({n_train_actives} actives)"
-    )
-    logger.info(f"{dataset}: test={len(test_df)} ({n_test_actives} actives)")
-
-    return train_df, test_df
-
-
 def _objective(
     trial,
-    train_smiles,
-    train_targets,
-    random_state: int,
+    train_df: pd.DataFrame,
 ) -> float:
-    """Optuna objective: val AP after training on a 0.9 split."""
+    """Optuna objective: mean AP from 5-fold Butina GroupKFold CV.
+
+    Uses GroupKFold with cluster_id as groups to ensure no structural
+    leakage between train and validation folds.
+    """
     params = {
         "depth": trial.suggest_int("depth", 2, 6),
         "message_hidden_dim": trial.suggest_categorical(
@@ -193,91 +197,110 @@ def _objective(
         "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
     }
 
-    datapoints = _make_datapoints(train_smiles, train_targets)
-    n = len(datapoints)
-    n_train = int(0.9 * n)
-    rng = np.random.RandomState(random_state)
-    indices = rng.permutation(n)
-    train_dps = [datapoints[i] for i in indices[:n_train]]
-    val_dps = [datapoints[i] for i in indices[n_train:]]
+    all_smiles = train_df["standardized_smiles"].tolist()
+    all_targets = train_df["target"].tolist()
+    all_clusters = train_df["cluster_id"].tolist()
 
-    train_dataset = MoleculeDataset(train_dps)
-    val_dataset = MoleculeDataset(val_dps)
+    gkf = GroupKFold(n_splits=5)
+    X = np.arange(len(train_df))
+    y = np.array(all_targets)
+    groups = np.array(all_clusters)
 
-    train_loader = build_dataloader(
-        train_dataset,
-        batch_size=params["batch_size"],
-        shuffle=True,
-        num_workers=0,
-    )
-    val_loader = build_dataloader(
-        val_dataset,
-        batch_size=params["batch_size"],
-        shuffle=False,
-        num_workers=0,
-    )
+    fold_scores = []
 
-    model = _build_model(**params)
-    _train_model(model, train_loader, val_loader, epochs=15)
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups)):
+        train_smiles_fold = [all_smiles[i] for i in train_idx]
+        train_targets_fold = [all_targets[i] for i in train_idx]
+        val_smiles_fold = [all_smiles[i] for i in val_idx]
+        val_targets_fold = [all_targets[i] for i in val_idx]
 
-    val_preds = _predict(model, val_loader)
-    val_targets = np.array([dp.y[0] for dp in val_dps])
-    return float(average_precision_score(val_targets, val_preds))
+        val_clusters = set([all_clusters[i] for i in val_idx])
 
-
-def _run_tuning(
-    train_smiles,
-    train_targets,
-    dataset: str,
-    n_trials: int,
-    random_state: int,
-) -> dict:
-    """Run Optuna hyperparameter search and log results to MLflow."""
-    logger.info(f"Tuning with Optuna ({n_trials} trials, 15 epochs each)...")
-    study = optuna.create_study(
-        direction="maximize",
-        sampler=optuna.samplers.TPESampler(seed=random_state),
-    )
-    study.optimize(
-        lambda trial: _objective(
-            trial, train_smiles, train_targets, random_state
-        ),
-        n_trials=n_trials,
-        show_progress_bar=True,
-    )
-
-    best_params = study.best_params
-    best_val_ap = study.best_value
-
-    logger.success(f"Tuning done: best val AP = {best_val_ap:.4f}")
-    for k, v in best_params.items():
-        logger.info(f"  {k}: {v}")
-
-    with mlflow.start_run(run_name=f"tuning/chemprop/{dataset}", nested=False):
-        mlflow.log_params(best_params)
-        mlflow.log_metric("best_val_average_precision", best_val_ap)
-        mlflow.log_param("n_trials", n_trials)
-        mlflow.set_tags(
-            {"dataset": dataset, "model": "chemprop", "stage": "tuning"}
+        logger.debug(
+            f"  Fold {fold}: train={len(train_idx)}, val={len(val_idx)}, "
+            f"val_clusters={sorted(val_clusters)}"
         )
 
-    return best_params
+        train_dps = _make_datapoints(train_smiles_fold, train_targets_fold)
+        val_dps = _make_datapoints(val_smiles_fold, val_targets_fold)
+
+        train_dataset = MoleculeDataset(train_dps)
+        val_dataset = MoleculeDataset(val_dps)
+
+        train_loader = build_dataloader(
+            train_dataset,
+            batch_size=params["batch_size"],
+            shuffle=True,
+            num_workers=0,
+        )
+        val_loader = build_dataloader(
+            val_dataset,
+            batch_size=params["batch_size"],
+            shuffle=False,
+            num_workers=0,
+        )
+
+        model = _build_model(**params)
+        _train_model(model, train_loader, val_loader, epochs=15)
+
+        val_preds = _predict(model, val_loader)
+        val_targets_arr = np.array([dp.y[0] for dp in val_dps])
+
+        if len(set(val_targets_arr)) < 2:
+            logger.warning(
+                f"Fold {fold}: only one class in validation, skipping"
+            )
+            continue
+
+        ap = average_precision_score(val_targets_arr, val_preds)
+        fold_scores.append(ap)
+        logger.debug(f"  Fold {fold}: AP = {ap:.4f}")
+
+    if not fold_scores:
+        return 0.0
+
+    mean_ap = float(np.mean(fold_scores))
+    logger.debug(f"Mean CV AP: {mean_ap:.4f}")
+    return mean_ap
 
 
 def _train_and_predict(
-    train_smiles,
-    train_targets,
-    test_smiles,
+    train_df: pd.DataFrame,
+    test_smiles: list[str],
     params: dict,
     out_dir: Path,
 ) -> pd.DataFrame:
-    """Build model, train on full training data, predict on test set."""
-    datapoints = _make_datapoints(train_smiles, train_targets)
-    n = len(datapoints)
-    n_train = int(0.9 * n)
-    indices = np.random.RandomState(42).permutation(n)
-    train_dps = [datapoints[i] for i in indices[:n_train]]
-    val_dps = [datapoints[i] for i in indices[n_train:]]
+    """Build model, train on full training data, predict on test set.
+
+    Uses Butina OOD split (smallest clusters as validation) for early stopping.
+    """
+    inner_train_df, inner_val_df = split_by_clusters(train_df, train_size=0.9)
+
+    n_train = len(inner_train_df)
+    n_val = len(inner_val_df)
+    train_clusters = sorted(set(inner_train_df["cluster_id"]))
+    val_clusters = sorted(set(inner_val_df["cluster_id"]))
+
+    logger.info(
+        f"OOD inner split: train={n_train} (clusters {train_clusters}), "
+        f"val={n_val} (clusters {val_clusters})"
+    )
+
+    if n_val == 0:
+        logger.warning(
+            "Validation set is empty after OOD split! "
+            "Falling back to using training set for validation."
+        )
+        inner_train_df, inner_val_df = train_df, train_df
+
+    train_dps = _make_datapoints(
+        inner_train_df["standardized_smiles"].tolist(),
+        inner_train_df["target"].tolist(),
+    )
+    val_dps = _make_datapoints(
+        inner_val_df["standardized_smiles"].tolist(),
+        inner_val_df["target"].tolist(),
+    )
 
     train_dataset = MoleculeDataset(train_dps)
     val_dataset = MoleculeDataset(val_dps)
@@ -310,6 +333,7 @@ def _train_and_predict(
         train_loader,
         val_loader,
         epochs=params.get("epochs", 30),
+        restore_best_weights=False,
     )
 
     probs = _predict(model, test_loader)
@@ -325,84 +349,41 @@ def _train_and_predict(
     )
 
 
-def _save_predictions(
-    preds: pd.DataFrame, out_dir: Path, filename: str
-) -> Path:
-    """Write predictions CSV and return the path."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / filename
-    preds.to_csv(out_path, index=False)
-    logger.success(f"Predictions saved to {out_path}")
-    return out_path
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Train Chemprop MPNN and predict."
-    )
-    parser.add_argument(
-        "--dataset", required=True, help="Dataset name (e.g. stokes)"
-    )
-    parser.add_argument(
-        "--data-dir",
-        default="data",
-        help="Data directory (default: data)",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=42,
-        help="Random state (default: 42)",
-    )
-    parser.add_argument(
-        "--tune",
-        action="store_true",
-        help="Run Optuna hyperparameter tuning before final training",
-    )
-    parser.add_argument(
-        "--n-trials",
-        type=int,
-        default=30,
-        help="Number of tuning trials (default: 30)",
-    )
-    return parser.parse_args()
-
-
 def main() -> None:
     """Train Chemprop, predict, save predictions."""
-    args = _parse_args()
+    args = parse_training_args(description="Train Chemprop MPNN and predict.")
     data_dir = Path(args.data_dir)
     dataset = args.dataset
 
-    train_df, test_df = _load_data(
+    train_df, test_df = load_split_data(
         data_dir / "splits" / f"{dataset}_train.csv",
         data_dir / "splits" / f"{dataset}_test.csv",
         dataset,
+        require_cluster_id=True,
     )
 
     params = _default_params()
     if args.tune:
-        params = _run_tuning(
-            train_df["standardized_smiles"],
-            train_df["target"],
+        n_clusters = train_df["cluster_id"].nunique()
+        params = run_optuna_tuning(
+            lambda trial: _objective(trial, train_df),
             dataset,
-            args.n_trials,
-            args.random_state,
+            model_name="chemprop",
+            n_trials=args.n_trials,
+            random_state=args.random_state,
+            n_clusters=n_clusters,
         )
 
     params["epochs"] = 30
 
     preds = _train_and_predict(
-        train_df["standardized_smiles"],
-        train_df["target"],
-        test_df["standardized_smiles"],
+        train_df,
+        test_df["standardized_smiles"].tolist(),
         params,
         data_dir / "predictions" / dataset,
     )
 
-    _save_predictions(
-        preds, data_dir / "predictions" / dataset, "chemprop.csv"
-    )
+    save_predictions(preds, data_dir / "predictions" / dataset, "chemprop.csv")
 
 
 if __name__ == "__main__":
