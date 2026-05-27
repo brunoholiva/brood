@@ -17,7 +17,7 @@ def evaluate(
     label_col="target",
     distance_col="distance_to_train",
     bins=None,
-    bedrock_alpha=20.0,
+    bedroc_alpha=20.0,
 ):
     """Evaluate screening performance globally and binned by distance.
 
@@ -28,13 +28,13 @@ def evaluate(
     score_col : str, optional
         Column name for predicted probabilities (positive class).
     label_col : str, optional
-        Column name for true binary labels.
+        Column name for true binary labels (0/1).
     distance_col : str, optional
         Column name for distance to training set.
     bins : list of (low, high, name), optional
-        Distance bin edges. Default: ``[(0, 0.3, "near"),
-        (0.3, 0.6, "medium"), (0.6, 1.01, "far")]``.
-    bedrock_alpha : float, optional
+        Distance bins for per-bin metrics. Defaults to near (0-0.3),
+        medium (0.3-0.6), far (0.6+).
+    bedroc_alpha : float, optional
         BEDROC early-enrichment parameter (higher = more weight
         on top-ranked molecules).
 
@@ -50,7 +50,7 @@ def evaluate(
     y_score = df[score_col].to_numpy()
     distances = df[distance_col].to_numpy()
 
-    global_metrics = _compute_ranking_metrics(y_true, y_score, bedrock_alpha)
+    global_metrics = _compute_ranking_metrics(y_true, y_score, bedroc_alpha)
 
     bins = bins or DEFAULT_BINS
     by_bin = []
@@ -63,7 +63,7 @@ def evaluate(
         metrics = _compute_ranking_metrics(
             subset[label_col].to_numpy(),
             subset[score_col].to_numpy(),
-            bedrock_alpha,
+            bedroc_alpha,
         )
         metrics["bin"] = name
         metrics["n"] = len(subset)

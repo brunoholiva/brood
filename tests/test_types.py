@@ -22,7 +22,7 @@ class TestConfigs:
 
     def test_eval_config_defaults(self):
         cfg = EvalConfig()
-        assert cfg.bedrock_alpha == 20.0
+        assert cfg.bedroc_alpha == 20.0
         assert cfg.distance_bins is None
 
     def test_column_config_defaults(self):

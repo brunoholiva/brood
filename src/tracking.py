@@ -48,8 +48,8 @@ def log_experiment(
 
         if eval_cfg is not None:
             params = {}
-            if eval_cfg.bedrock_alpha is not None:
-                params["eval_bedrock_alpha"] = eval_cfg.bedrock_alpha
+            if eval_cfg.bedroc_alpha is not None:
+                params["eval_bedroc_alpha"] = eval_cfg.bedroc_alpha
             if eval_cfg.distance_bins is not None:
                 for i, (lo, hi, name) in enumerate(eval_cfg.distance_bins):
                     params[f"eval_bin_{i}_name"] = name

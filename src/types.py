@@ -62,12 +62,12 @@ class EvalConfig:
     distance_bins : list of (low, high, name) or None
         Distance bins for per-bin metrics. Defaults to near (0-0.3),
         medium (0.3-0.6), far (0.6+).
-    bedrock_alpha : float
+    bedroc_alpha : float
         BEDROC early-enrichment parameter.
     """
 
     distance_bins: Optional[list] = None
-    bedrock_alpha: float = 20.0
+    bedroc_alpha: float = 20.0
 
 
 @dataclass
