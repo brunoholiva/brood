@@ -18,8 +18,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
-from lightning import pytorch as pl
 from loguru import logger
 from rdkit import Chem, RDLogger
 from sklearn.metrics import average_precision_score
@@ -43,8 +41,10 @@ from src.splitter import split_by_clusters
 from src.training_utils import (
     load_split_data,
     parse_training_args,
+    predict_lightning,
     run_optuna_tuning,
     save_predictions,
+    train_lightning_model,
 )
 
 RDLogger.logger().setLevel(RDLogger.ERROR)
@@ -99,79 +99,6 @@ def _default_params() -> dict:
         "batch_size": 64,
         "epochs": 30,
     }
-
-
-def _train_model(
-    model: MPNN,
-    train_loader,
-    val_loader,
-    epochs: int,
-    checkpoint_dir: Path | None = None,
-    restore_best_weights: bool = True,
-) -> pl.Trainer:
-    """Train an MPNN with Lightning and return the trainer.
-
-    Parameters
-    ----------
-    model : MPNN
-        The model to train.
-    train_loader : DataLoader
-        Training data loader.
-    val_loader : DataLoader
-        Validation data loader.
-    epochs : int
-        Maximum number of epochs.
-    checkpoint_dir : Path | None
-        Directory for model checkpoints (if any).
-    restore_best_weights : bool
-        If True, restore weights from best val_loss epoch when early stopping.
-        If False, keep weights from last training epoch.
-    """
-    callbacks = [
-        pl.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=10,
-            mode="min",
-            restore_best_weights=restore_best_weights,
-        ),
-    ]
-    if checkpoint_dir is not None:
-        callbacks.append(
-            pl.callbacks.ModelCheckpoint(
-                dirpath=str(checkpoint_dir),
-                monitor="val_loss",
-                mode="min",
-                save_top_k=1,
-            )
-        )
-    trainer = pl.Trainer(
-        max_epochs=epochs,
-        accelerator="auto",
-        devices=1,
-        callbacks=callbacks,
-        enable_progress_bar=False,
-        enable_model_summary=False,
-        logger=False,
-    )
-    trainer.fit(model, train_loader, val_loader)
-    return trainer
-
-
-def _predict(model: MPNN, test_loader) -> np.ndarray:
-    """Return predicted probabilities for the test set.
-
-    ``BinaryClassificationFFN.forward`` already applies sigmoid,
-    so the model outputs raw probabilities in [0, 1].
-    """
-    trainer = pl.Trainer(
-        accelerator="auto",
-        devices=1,
-        enable_progress_bar=False,
-        enable_model_summary=False,
-        logger=False,
-    )
-    outputs = trainer.predict(model, dataloaders=test_loader)
-    return torch.cat(outputs).squeeze().numpy()
 
 
 def _objective(
@@ -241,9 +168,9 @@ def _objective(
         )
 
         model = _build_model(**params)
-        _train_model(model, train_loader, val_loader, epochs=15)
+        train_lightning_model(model, train_loader, val_loader, epochs=15)
 
-        val_preds = _predict(model, val_loader)
+        val_preds = predict_lightning(model, val_loader)
         val_targets_arr = np.array([dp.y[0] for dp in val_dps])
 
         if len(set(val_targets_arr)) < 2:
@@ -328,15 +255,15 @@ def _train_and_predict(
     )
 
     model = _build_model(**params)
-    _train_model(
+    train_lightning_model(
         model,
         train_loader,
         val_loader,
         epochs=params.get("epochs", 30),
-        restore_best_weights=False,
+        restore_best_weights=True,
     )
 
-    probs = _predict(model, test_loader)
+    probs = predict_lightning(model, test_loader)
 
     model_path = out_dir / "chemprop.pt"
     save_model(str(model_path), model)
