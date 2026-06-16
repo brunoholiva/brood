@@ -7,22 +7,9 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 
 class MorganFingerprintTransformer(BaseEstimator, TransformerMixin):
-    """Convert SMILES strings to Morgan fingerprint bit vectors.
+    """Convert SMILES to Morgan fingerprint bit vectors (ECFP4).
 
-    Uses ECFP4 (Morgan radius 2, 2048 bits) by default, matching the
-    fingerprint used internally by the Taylor-Butina splitter.
-
-    Designed for use in :class:`~sklearn.pipeline.Pipeline`:
-
-    .. code:: python
-
-        from sklearn.pipeline import Pipeline
-
-        pipe = Pipeline([
-            ("fps", MorganFingerprintTransformer()),
-            ("clf", RandomForestClassifier()),
-        ])
-        pipe.fit(smiles, targets)
+    Stateless sklearn transformer for use in Pipeline.
 
     Parameters
     ----------
@@ -37,33 +24,11 @@ class MorganFingerprintTransformer(BaseEstimator, TransformerMixin):
         self.fp_size = fp_size
 
     def fit(self, X, y=None):
-        """No-op. Stateless transformer.
-
-        Parameters
-        ----------
-        X : array-like of str
-            SMILES strings.
-        y : array-like, optional
-            Ignored.
-
-        Returns
-        -------
-        self : MorganFingerprintTransformer
-        """
+        """Stateless transformer; returns self."""
         return self
 
     def transform(self, X):
-        """Convert SMILES strings to Morgan fingerprint bit matrix.
-
-        Parameters
-        ----------
-        X : array-like of str
-            SMILES strings.
-
-        Returns
-        -------
-        fps : ndarray of shape (n_samples, fp_size) and dtype int64
-        """
+        """Convert SMILES strings to (n_samples, fp_size) int64 matrix."""
         generator = AllChem.GetMorganGenerator(
             radius=self.radius, fpSize=self.fp_size
         )

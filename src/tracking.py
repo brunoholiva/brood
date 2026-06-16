@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import asdict
-from typing import Optional
 
 import mlflow
 
@@ -15,10 +14,10 @@ from .types import BroodResult, EvalConfig, SplitConfig
 def log_experiment(
     run_name: str,
     result: BroodResult,
-    split_cfg: Optional[SplitConfig] = None,
-    eval_cfg: Optional[EvalConfig] = None,
-    tags: Optional[dict] = None,
-    extra_params: Optional[dict] = None,
+    split_cfg: SplitConfig | None = None,
+    eval_cfg: EvalConfig | None = None,
+    tags: dict | None = None,
+    extra_params: dict | None = None,
 ) -> None:
     """Log a brood screening experiment to MLflow.
 
@@ -48,8 +47,7 @@ def log_experiment(
 
         if eval_cfg is not None:
             params = {}
-            if eval_cfg.bedroc_alpha is not None:
-                params["eval_bedroc_alpha"] = eval_cfg.bedroc_alpha
+            params["eval_bedroc_alpha"] = eval_cfg.bedroc_alpha
             if eval_cfg.distance_bins is not None:
                 for i, (lo, hi, name) in enumerate(eval_cfg.distance_bins):
                     params[f"eval_bin_{i}_name"] = name
@@ -61,7 +59,6 @@ def log_experiment(
             mlflow.log_params(extra_params)
 
         mlflow.log_param("global_n", result.global_.n)
-        mlflow.log_param("n_test", result.global_.n)
         mlflow.log_metric(
             "global_average_precision", result.global_.average_precision
         )
