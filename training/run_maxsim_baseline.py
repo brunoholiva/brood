@@ -12,7 +12,6 @@ Usage
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -24,6 +23,8 @@ from tqdm import tqdm
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
+from src.argparse_utils import build_base_arg_parser
+from src.data_utils import load_split_data, save_predictions
 from src.fingerprints import MorganFingerprintTransformer
 
 BATCH_SIZE = 5000
@@ -50,49 +51,9 @@ def _score_via_similarity(test_fps, active_fps, batch_size=BATCH_SIZE):
     return scores
 
 
-def _load_data(
-    train_path: Path, test_path: Path, dataset: str
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if not train_path.exists():
-        logger.error(f"{train_path} not found. Run split_datasets.py first.")
-        sys.exit(1)
-    if not test_path.exists():
-        logger.error(f"{test_path} not found. Run split_datasets.py first.")
-        sys.exit(1)
-
-    train_df = pd.read_csv(train_path)
-    test_df = pd.read_csv(test_path)
-
-    n_train_actives = int(train_df["target"].sum())
-    n_test_actives = int(test_df["target"].sum())
-
-    logger.info(
-        f"{dataset}: train={len(train_df)} ({n_train_actives} actives)"
-    )
-    logger.info(f"{dataset}: test={len(test_df)} ({n_test_actives} actives)")
-
-    return train_df, test_df
-
-
-def _save_predictions(preds, out_dir, filename):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / filename
-    preds.to_csv(out_path, index=False)
-    logger.success(f"Predictions saved to {out_path}")
-    return out_path
-
-
 def _parse_args():
-    parser = argparse.ArgumentParser(
+    parser = build_base_arg_parser(
         description="Similarity baseline: score by max Tanimoto to active."
-    )
-    parser.add_argument(
-        "--dataset", required=True, help="Dataset name (e.g. stokes)"
-    )
-    parser.add_argument(
-        "--data-dir",
-        default="data",
-        help="Data directory (default: data)",
     )
     parser.add_argument(
         "--batch-size",
@@ -109,10 +70,11 @@ def main():
     data_dir = Path(args.data_dir)
     dataset = args.dataset
 
-    train_df, test_df = _load_data(
+    train_df, test_df = load_split_data(
         data_dir / "splits" / f"{dataset}_train.csv",
         data_dir / "splits" / f"{dataset}_test.csv",
         dataset,
+        require_cluster_id=False,
     )
 
     active_mask = train_df["target"] == 1
@@ -122,15 +84,19 @@ def main():
         sys.exit(1)
 
     logger.info(
-        f"Generating fingerprints ({len(train_actives)} actives, "
-        f"{len(test_df)} test)..."
+        f"{dataset}: generating fingerprints — {len(train_actives)} actives, "
+        f"{len(test_df)} test"
     )
     train_active_fps = _build_fingerprints(
         train_actives["standardized_smiles"]
     )
     test_fps = _build_fingerprints(test_df["standardized_smiles"])
 
-    logger.info("Scoring test molecules by similarity to actives...")
+    logger.info(
+        "{}: scoring {} test molecules by Tanimoto sim to {} actives".format(
+            dataset, len(test_df), len(train_actives)
+        )
+    )
     scores = _score_via_similarity(test_fps, train_active_fps, args.batch_size)
 
     preds = pd.DataFrame(
@@ -140,7 +106,7 @@ def main():
         }
     )
 
-    _save_predictions(
+    save_predictions(
         preds, data_dir / "predictions" / dataset, "similarity.csv"
     )
 

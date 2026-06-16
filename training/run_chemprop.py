@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train a Chemprop v2 MPNN and save predictions.
 
-Pipeline: AtomMessagePassing → MeanAggregation → BinaryClassificationFFN.
+Pipeline: AtomMessagePassing → SumAggregation → BinaryClassificationFFN.
 
 Optionally tune hyperparameters with Optuna (--tune).
 
@@ -32,20 +32,16 @@ from chemprop.data import (
     build_dataloader,
 )
 from chemprop.models import MPNN, save_model
-from chemprop.nn.agg import MeanAggregation
-from chemprop.nn.message_passing import AtomMessagePassing
+from chemprop.nn.agg import SumAggregation
+from chemprop.nn.message_passing import BondMessagePassing
 from chemprop.nn.metrics import BinaryAUPRC
 from chemprop.nn.predictors import BinaryClassificationFFN
 
-from src.splitter import split_by_clusters
-from src.training_utils import (
-    load_split_data,
-    parse_training_args,
-    predict_lightning,
-    run_optuna_tuning,
-    save_predictions,
-    train_lightning_model,
-)
+from src.argparse_utils import parse_training_args
+from src.data_utils import load_split_data, save_predictions
+from src.lightning_utils import predict_lightning, train_lightning_model
+from src.splitter import split_train_test
+from src.tuning_utils import run_optuna_tuning
 
 RDLogger.logger().setLevel(RDLogger.ERROR)
 
@@ -66,12 +62,13 @@ def _make_datapoints(smiles_list, targets_list) -> list[MoleculeDatapoint]:
 
 def _build_model(**kwargs) -> MPNN:
     """Build an MPNN with message passing, aggregation, and predictor."""
-    mp = AtomMessagePassing(
+    mp = BondMessagePassing(
         d_h=kwargs.get("message_hidden_dim", 300),
         depth=kwargs.get("depth", 3),
         dropout=kwargs.get("dropout", 0.0),
+        undirected=True,
     )
-    agg = MeanAggregation()
+    agg = SumAggregation()
     predictor = BinaryClassificationFFN(
         input_dim=mp.output_dim,
         hidden_dim=kwargs.get("ffn_hidden_dim", 300),
@@ -98,6 +95,7 @@ def _default_params() -> dict:
         "max_lr": 1e-3,
         "batch_size": 64,
         "epochs": 30,
+        "patience": 10,
     }
 
 
@@ -113,15 +111,14 @@ def _objective(
     params = {
         "depth": trial.suggest_int("depth", 2, 6),
         "message_hidden_dim": trial.suggest_categorical(
-            "message_hidden_dim", [128, 256, 512]
+            "message_hidden_dim", [64, 128, 256, 512, 1024, 2048]
         ),
         "dropout": trial.suggest_float("dropout", 0.0, 0.4),
         "ffn_hidden_dim": trial.suggest_categorical(
-            "ffn_hidden_dim", [128, 256, 512]
+            "ffn_hidden_dim", [64, 128, 256, 512, 1024, 2048]
         ),
         "ffn_num_layers": trial.suggest_int("ffn_num_layers", 1, 3),
         "max_lr": trial.suggest_float("max_lr", 1e-4, 1e-2, log=True),
-        "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
     }
 
     all_smiles = train_df["standardized_smiles"].tolist()
@@ -141,11 +138,10 @@ def _objective(
         val_smiles_fold = [all_smiles[i] for i in val_idx]
         val_targets_fold = [all_targets[i] for i in val_idx]
 
-        val_clusters = set([all_clusters[i] for i in val_idx])
-
-        logger.debug(
-            f"  Fold {fold}: train={len(train_idx)}, val={len(val_idx)}, "
-            f"val_clusters={sorted(val_clusters)}"
+        logger.info(
+            "  Fold {}/5  |  train={}, val={}".format(
+                fold + 1, len(train_idx), len(val_idx)
+            )
         )
 
         train_dps = _make_datapoints(train_smiles_fold, train_targets_fold)
@@ -156,19 +152,27 @@ def _objective(
 
         train_loader = build_dataloader(
             train_dataset,
-            batch_size=params["batch_size"],
+            batch_size=64,
             shuffle=True,
             num_workers=0,
         )
         val_loader = build_dataloader(
             val_dataset,
-            batch_size=params["batch_size"],
+            batch_size=64,
             shuffle=False,
             num_workers=0,
         )
 
         model = _build_model(**params)
-        train_lightning_model(model, train_loader, val_loader, epochs=15)
+        train_lightning_model(
+            model,
+            train_loader,
+            val_loader,
+            epochs=15,
+            patience=5,
+            monitor="val_loss",
+            monitor_mode="max",
+        )
 
         val_preds = predict_lightning(model, val_loader)
         val_targets_arr = np.array([dp.y[0] for dp in val_dps])
@@ -181,17 +185,16 @@ def _objective(
 
         ap = average_precision_score(val_targets_arr, val_preds)
         fold_scores.append(ap)
-        logger.debug(f"  Fold {fold}: AP = {ap:.4f}")
 
     if not fold_scores:
         return 0.0
 
     mean_ap = float(np.mean(fold_scores))
-    logger.debug(f"Mean CV AP: {mean_ap:.4f}")
     return mean_ap
 
 
 def _train_and_predict(
+    dataset: str,
     train_df: pd.DataFrame,
     test_smiles: list[str],
     params: dict,
@@ -201,16 +204,21 @@ def _train_and_predict(
 
     Uses Butina OOD split (smallest clusters as validation) for early stopping.
     """
-    inner_train_df, inner_val_df = split_by_clusters(train_df, train_size=0.9)
+    inner_train_df, inner_val_df = split_train_test(train_df, train_size=0.9)
 
     n_train = len(inner_train_df)
     n_val = len(inner_val_df)
-    train_clusters = sorted(set(inner_train_df["cluster_id"]))
-    val_clusters = sorted(set(inner_val_df["cluster_id"]))
+    n_train_clusters = inner_train_df["cluster_id"].nunique()
+    n_val_clusters = inner_val_df["cluster_id"].nunique()
 
     logger.info(
-        f"OOD inner split: train={n_train} (clusters {train_clusters}), "
-        f"val={n_val} (clusters {val_clusters})"
+        "{}: inner split — train={} ({} clust), val={} ({} clust)".format(
+            dataset,
+            n_train,
+            n_train_clusters,
+            n_val,
+            n_val_clusters,
+        )
     )
 
     if n_val == 0:
@@ -255,18 +263,31 @@ def _train_and_predict(
     )
 
     model = _build_model(**params)
-    train_lightning_model(
+    _, best_metric = train_lightning_model(
         model,
         train_loader,
         val_loader,
         epochs=params.get("epochs", 30),
+        patience=params.get("patience", 10),
         restore_best_weights=True,
+        enable_progress_bar=True,
+        monitor="val_loss",
+        monitor_mode="max",
     )
 
     probs = predict_lightning(model, test_loader)
 
     model_path = out_dir / "chemprop.pt"
     save_model(str(model_path), model)
+
+    if best_metric is not None:
+        logger.success(
+            "Chemprop model saved to {} (best val_loss={:.4f})".format(
+                model_path, best_metric
+            )
+        )
+    else:
+        logger.success(f"Chemprop model saved to {model_path}")
 
     return pd.DataFrame(
         {
@@ -292,7 +313,7 @@ def main() -> None:
     params = _default_params()
     if args.tune:
         n_clusters = train_df["cluster_id"].nunique()
-        params = run_optuna_tuning(
+        best_params = run_optuna_tuning(
             lambda trial: _objective(trial, train_df),
             dataset,
             model_name="chemprop",
@@ -300,10 +321,12 @@ def main() -> None:
             random_state=args.random_state,
             n_clusters=n_clusters,
         )
+        params.update(best_params)
 
     params["epochs"] = 30
 
     preds = _train_and_predict(
+        dataset,
         train_df,
         test_df["standardized_smiles"].tolist(),
         params,
