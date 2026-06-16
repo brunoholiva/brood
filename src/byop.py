@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from .evaluator import evaluate
-from .types import BinMetrics, BroodResult, RankingMetrics
+from .types import BroodResult
 
 
 def load_predictions(
@@ -54,15 +54,9 @@ def evaluate_predictions(
     distance_col: str = "distance_to_train",
 ) -> BroodResult:
     """Evaluate predictions and return a BroodResult."""
-    eval_result = evaluate(
+    return evaluate(
         merged_df,
         score_col=score_col,
         label_col=label_col,
         distance_col=distance_col,
-    )
-    return BroodResult(
-        global_=RankingMetrics(**eval_result["global"]),
-        by_bin=[BinMetrics(**b) for b in eval_result["by_bin"]],
-        test_df=merged_df,
-        pipeline=None,
     )

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.evaluator import evaluate
+from src.evaluator import _compute_by_bin, _compute_global, evaluate
 
 N = 100
 NP_RNG = np.random.default_rng(42)
@@ -59,54 +59,54 @@ class TestGlobal:
     def test_perfect_predictions(self, perfect_df):
         """Perfect ranking gives AP=1 and BEDROC=1."""
         result = evaluate(perfect_df)
-        g = result["global"]
-        assert g["average_precision"] == pytest.approx(1.0)
-        assert g["bedroc"] == pytest.approx(1.0)
+        g = result.global_
+        assert g.average_precision == pytest.approx(1.0)
+        assert g.bedroc == pytest.approx(1.0)
 
     def test_output_keys(self, random_df):
-        """Result dict has global and by_bin keys."""
+        """Result has global_ (RankingMetrics) and by_bin (list of BinMetrics)."""
         result = evaluate(random_df)
-        assert "global" in result
-        assert "by_bin" in result
+        assert hasattr(result, "global_")
+        assert hasattr(result, "by_bin")
 
     def test_global_has_required_fields(self, perfect_df):
         """Global entry has n, average_precision, bedroc."""
-        g = evaluate(perfect_df)["global"]
-        for key in ("n", "average_precision", "bedroc"):
-            assert key in g
+        g = evaluate(perfect_df).global_
+        for attr in ("n", "average_precision", "bedroc"):
+            assert hasattr(g, attr)
 
     def test_global_n_matches_input(self, random_df):
         """Global n equals total number of samples."""
-        g = evaluate(random_df)["global"]
-        assert g["n"] == N
+        g = evaluate(random_df).global_
+        assert g.n == N
 
 
 class TestByBin:
     """Per-bin metrics structure and values."""
 
     def test_by_bin_is_list(self, perfect_df):
-        """by_bin is a list of bin result dicts."""
+        """by_bin is a list of BinMetrics."""
         result = evaluate(perfect_df)
-        assert isinstance(result["by_bin"], list)
+        assert isinstance(result.by_bin, list)
 
     def test_three_default_bins(self, perfect_df):
         """Default bins are near, medium, far."""
         result = evaluate(perfect_df)
-        names = [b["bin"] for b in result["by_bin"]]
+        names = [b.bin for b in result.by_bin]
         assert names == ["near", "medium", "far"]
 
     def test_each_bin_has_required_fields(self, perfect_df):
-        """Each bin entry has bin, n, average_precision, bedroc."""
+        """Each BinMetrics entry has bin, n, average_precision, bedroc."""
         result = evaluate(perfect_df)
-        for entry in result["by_bin"]:
-            for key in ("bin", "n", "average_precision", "bedroc"):
-                assert key in entry
+        for entry in result.by_bin:
+            for attr in ("bin", "n", "average_precision", "bedroc"):
+                assert hasattr(entry, attr)
 
     def test_bin_counts_sum_to_total(self, random_df):
         """Bin counts sum to global n."""
         result = evaluate(random_df)
-        total_bin = sum(b["n"] for b in result["by_bin"])
-        assert total_bin == result["global"]["n"]
+        total_bin = sum(b.n for b in result.by_bin)
+        assert total_bin == result.global_.n
 
 
 class TestValidation:
@@ -155,7 +155,7 @@ class TestValidation:
             label_col="label",
             distance_col="dist",
         )
-        assert "global" in result
+        assert hasattr(result, "global_")
 
 
 class TestEdgeCases:
@@ -164,10 +164,10 @@ class TestEdgeCases:
     def test_empty_bin_returns_nan(self, perfect_df):
         """Bin with no molecules returns NaN metrics."""
         result = evaluate(perfect_df, bins=[(0.99, 1.0, "empty")])
-        entry = result["by_bin"][0]
-        assert entry["n"] == 0
-        assert np.isnan(entry["average_precision"])
-        assert np.isnan(entry["bedroc"])
+        entry = result.by_bin[0]
+        assert entry.n == 0
+        assert np.isnan(entry.average_precision)
+        assert np.isnan(entry.bedroc)
 
     def test_custom_bins(self, perfect_df):
         """Custom bin edges produce expected bin names."""
@@ -175,7 +175,7 @@ class TestEdgeCases:
             perfect_df,
             bins=[(0.0, 0.5, "close"), (0.5, 1.01, "far")],
         )
-        names = [b["bin"] for b in result["by_bin"]]
+        names = [b.bin for b in result.by_bin]
         assert names == ["close", "far"]
 
 
@@ -219,7 +219,43 @@ class TestIntegration:
 
         result = evaluate(test_df)
 
-        assert result["global"]["average_precision"] >= 0
-        assert result["global"]["bedroc"] >= 0
-        for entry in result["by_bin"]:
-            assert entry["n"] >= 0
+        assert result.global_.average_precision >= 0
+        assert result.global_.bedroc >= 0
+        for entry in result.by_bin:
+            assert entry.n >= 0
+
+
+class TestComputeHelpers:
+    """Unit tests for the extracted private helpers."""
+
+    def test_compute_global_returns_expected_keys(self, perfect_df):
+        result = _compute_global(
+            perfect_df, "predicted_probability", "target", 20.0
+        )
+        assert hasattr(result, "n")
+        assert hasattr(result, "average_precision")
+        assert hasattr(result, "bedroc")
+        assert result.n == len(perfect_df)
+
+    def test_compute_by_bin_returns_list(self, random_df):
+        bins = _compute_by_bin(
+            random_df,
+            "distance_to_train",
+            "target",
+            "predicted_probability",
+            20.0,
+        )
+        assert isinstance(bins, list)
+        assert all(hasattr(b, "bin") for b in bins)
+        assert all(hasattr(b, "n_actives") for b in bins)
+
+    def test_compute_by_bin_counts_match_global(self, random_df):
+        by_bin = _compute_by_bin(
+            random_df,
+            "distance_to_train",
+            "target",
+            "predicted_probability",
+            20.0,
+        )
+        total = sum(b.n for b in by_bin)
+        assert total == len(random_df)
