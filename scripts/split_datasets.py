@@ -99,7 +99,7 @@ def _split_csv(
         return
 
     try:
-        train_df, test_df = taylor_butina_split(df, n_jobs=10)
+        train_df, test_df = taylor_butina_split(df)
     except Exception as e:
         logger.error(f"{dataset}: split failed — {e}")
         return
