@@ -48,7 +48,7 @@ def load_split_data(
 
     if "cluster_id" in train_df.columns:
         n_clusters = train_df["cluster_id"].nunique()
-        logger.info(
+        logger.debug(
             f"{dataset}: train={len(train_df)} ({n_train_actives} actives, "
             f"{n_clusters} Butina clusters)"
         )
@@ -59,11 +59,11 @@ def load_split_data(
                 "scripts/split_datasets.py to regenerate splits."
             )
             sys.exit(1)
-        logger.info(
+        logger.debug(
             f"{dataset}: train={len(train_df)} ({n_train_actives} actives)"
         )
 
-    logger.info(f"{dataset}: test={len(test_df)} ({n_test_actives} actives)")
+    logger.debug(f"{dataset}: test={len(test_df)} ({n_test_actives} actives)")
 
     return train_df, test_df
 
