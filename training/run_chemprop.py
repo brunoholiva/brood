@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train a Chemprop v2 MPNN and save predictions.
 
-Pipeline: AtomMessagePassing → SumAggregation → BinaryClassificationFFN.
+Pipeline: AtomMessagePassing → NormAggregation → BinaryClassificationFFN.
 
 Optionally tune hyperparameters with Optuna (--tune).
 
@@ -18,6 +18,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn.functional as F
 from loguru import logger
 from rdkit import Chem, RDLogger
 from sklearn.metrics import average_precision_score
@@ -32,9 +34,9 @@ from chemprop.data import (
     build_dataloader,
 )
 from chemprop.models import MPNN, save_model
-from chemprop.nn.agg import SumAggregation
+from chemprop.nn.agg import NormAggregation
 from chemprop.nn.message_passing import BondMessagePassing
-from chemprop.nn.metrics import BinaryAUPRC
+from chemprop.nn.metrics import ArrayLike, BinaryAUPRC, ChempropMetric
 from chemprop.nn.predictors import BinaryClassificationFFN
 
 from src.argparse_utils import parse_training_args
@@ -60,7 +62,23 @@ def _make_datapoints(smiles_list, targets_list) -> list[MoleculeDatapoint]:
     return datapoints
 
 
-def _build_model(**kwargs) -> MPNN:
+class _WeightedBCELoss(ChempropMetric):
+    """BCEWithLogitsLoss with per-class weighting for imbalance."""
+
+    def __init__(self, pos_weight: float = 1.0, task_weights: ArrayLike = 1.0):
+        super().__init__(task_weights)
+        self.pos_weight = pos_weight
+
+    def _calc_unreduced_loss(self, preds, targets, *args) -> torch.Tensor:
+        pw = torch.tensor(
+            [self.pos_weight], device=preds.device, dtype=preds.dtype
+        )
+        return F.binary_cross_entropy_with_logits(
+            preds, targets, pos_weight=pw, reduction="none"
+        )
+
+
+def _build_model(pos_weight: float | None = None, **kwargs) -> MPNN:
     """Build an MPNN with message passing, aggregation, and predictor."""
     mp = BondMessagePassing(
         d_h=kwargs.get("message_hidden_dim", 300),
@@ -68,12 +86,18 @@ def _build_model(**kwargs) -> MPNN:
         dropout=kwargs.get("dropout", 0.0),
         undirected=True,
     )
-    agg = SumAggregation()
+    agg = NormAggregation()
+    criterion = (
+        _WeightedBCELoss(pos_weight=pos_weight)
+        if pos_weight is not None
+        else None
+    )
     predictor = BinaryClassificationFFN(
         input_dim=mp.output_dim,
         hidden_dim=kwargs.get("ffn_hidden_dim", 300),
         n_layers=kwargs.get("ffn_num_layers", 1),
         dropout=kwargs.get("dropout", 0.0),
+        criterion=criterion,
     )
     return MPNN(
         message_passing=mp,
@@ -103,7 +127,7 @@ def _objective(
     trial,
     train_df: pd.DataFrame,
 ) -> float:
-    """Optuna objective: mean AP from 5-fold Butina GroupKFold CV.
+    """Optuna objective: mean AP from GroupKFold CV.
 
     Uses GroupKFold with cluster_id as groups to ensure no structural
     leakage between train and validation folds.
@@ -125,7 +149,7 @@ def _objective(
     all_targets = train_df["target"].tolist()
     all_clusters = train_df["cluster_id"].tolist()
 
-    gkf = GroupKFold(n_splits=5)
+    gkf = GroupKFold(n_splits=3)
     X = np.arange(len(train_df))
     y = np.array(all_targets)
     groups = np.array(all_clusters)
@@ -137,12 +161,6 @@ def _objective(
         train_targets_fold = [all_targets[i] for i in train_idx]
         val_smiles_fold = [all_smiles[i] for i in val_idx]
         val_targets_fold = [all_targets[i] for i in val_idx]
-
-        logger.info(
-            "  Fold {}/5  |  train={}, val={}".format(
-                fold + 1, len(train_idx), len(val_idx)
-            )
-        )
 
         train_dps = _make_datapoints(train_smiles_fold, train_targets_fold)
         val_dps = _make_datapoints(val_smiles_fold, val_targets_fold)
@@ -163,14 +181,18 @@ def _objective(
             num_workers=0,
         )
 
-        model = _build_model(**params)
+        n_pos_fold = sum(train_targets_fold)
+        n_neg_fold = len(train_targets_fold) - n_pos_fold
+        pos_weight = n_neg_fold / n_pos_fold if n_pos_fold > 0 else 1.0
+
+        model = _build_model(pos_weight=pos_weight, **params)
         train_lightning_model(
             model,
             train_loader,
             val_loader,
             epochs=15,
             patience=5,
-            monitor="val_loss",
+            monitor="val/prc",
             monitor_mode="max",
         )
 
@@ -262,7 +284,12 @@ def _train_and_predict(
         num_workers=0,
     )
 
-    model = _build_model(**params)
+    train_targets_arr = inner_train_df["target"].values
+    n_pos = int(train_targets_arr.sum())
+    n_neg = len(train_targets_arr) - n_pos
+    pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+
+    model = _build_model(pos_weight=pos_weight, **params)
     _, best_metric = train_lightning_model(
         model,
         train_loader,
@@ -271,7 +298,7 @@ def _train_and_predict(
         patience=params.get("patience", 10),
         restore_best_weights=True,
         enable_progress_bar=True,
-        monitor="val_loss",
+        monitor="val/prc",
         monitor_mode="max",
     )
 

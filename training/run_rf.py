@@ -49,7 +49,12 @@ def _build_pipeline(featurizer="morgan", **kwargs) -> Pipeline:
             featurizer_step,
             ("var", VarianceThreshold()),
             ("kbest", SelectKBest(f_classif)),
-            ("rf", RandomForestClassifier(random_state=42)),
+            (
+                "rf",
+                RandomForestClassifier(
+                    class_weight="balanced_subsample", random_state=42
+                ),
+            ),
         ]
     ).set_params(**kwargs)
 
@@ -85,7 +90,7 @@ def _objective(trial, train_df: pd.DataFrame, featurizer: str) -> float:
     targets = train_df["target"]
 
     if "cluster_id" in train_df.columns:
-        cv = GroupKFold(n_splits=5)
+        cv = GroupKFold(n_splits=3)
         groups = train_df["cluster_id"]
         scores = cross_val_score(
             pipe,

@@ -87,6 +87,7 @@ class MolFormerClassifier(pl.LightningModule):
         weight_decay: float = 0.01,
         finetune_mode: str = "partial",
         unfreeze_last_n_layers: int = 4,
+        pos_weight: float | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -107,7 +108,10 @@ class MolFormerClassifier(pl.LightningModule):
             input_dim=MOLFORMER_EMBED_DIM,
             dropout=dropout,
         )
-        self.loss_fn = nn.BCEWithLogitsLoss()
+        pos_weight_tensor = (
+            torch.tensor([pos_weight]) if pos_weight is not None else None
+        )
+        self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
 
         self.validation_probs: list[torch.Tensor] = []
         self.validation_targets: list[torch.Tensor] = []
@@ -443,7 +447,9 @@ def _count_total_parameters(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
-def _build_model(**kwargs) -> MolFormerClassifier:
+def _build_model(
+    pos_weight: float | None = None, **kwargs
+) -> MolFormerClassifier:
     """Build a MolFormerClassifier."""
     return MolFormerClassifier(
         learning_rate=kwargs.get("learning_rate", 1e-4),
@@ -453,6 +459,7 @@ def _build_model(**kwargs) -> MolFormerClassifier:
         weight_decay=kwargs.get("weight_decay", 0.01),
         finetune_mode=kwargs.get("finetune_mode", "partial"),
         unfreeze_last_n_layers=kwargs.get("unfreeze_last_n_layers", 4),
+        pos_weight=pos_weight,
     )
 
 
@@ -516,7 +523,7 @@ def _objective(
     tokenizer,
     base_params: dict,
 ) -> float:
-    """Optuna objective: mean AP from 5-fold Butina GroupKFold CV."""
+    """Optuna objective: mean AP from GroupKFold CV."""
     finetune_mode = base_params["finetune_mode"]
 
     params = {
@@ -543,14 +550,14 @@ def _objective(
     if finetune_mode == "partial":
         params["unfreeze_last_n_layers"] = trial.suggest_categorical(
             "unfreeze_last_n_layers",
-            [2, 4, 6, 8],
+            [1, 2, 4],
         )
 
     all_smiles = train_df["standardized_smiles"].tolist()
     all_targets = train_df["target"].tolist()
     all_clusters = train_df["cluster_id"].tolist()
 
-    gkf = GroupKFold(n_splits=5)
+    gkf = GroupKFold(n_splits=3)
     X = np.arange(len(train_df))
     y = np.array(all_targets)
     groups = np.array(all_clusters)
@@ -564,12 +571,6 @@ def _objective(
         val_smiles_fold = [all_smiles[i] for i in val_idx]
         val_targets_fold = [all_targets[i] for i in val_idx]
 
-        logger.info(
-            "  Fold {}/5  |  train={}, val={}".format(
-                fold + 1, len(train_idx), len(val_idx)
-            )
-        )
-
         train_loader, val_loader = _make_loaders(
             train_smiles_fold,
             train_targets_fold,
@@ -579,13 +580,17 @@ def _objective(
             collate_fn,
         )
 
-        model = _build_model(**params)
+        n_pos_fold = sum(train_targets_fold)
+        n_neg_fold = len(train_targets_fold) - n_pos_fold
+        pos_weight = n_neg_fold / n_pos_fold if n_pos_fold > 0 else None
+
+        model = _build_model(pos_weight=pos_weight, **params)
         train_lightning_model(
             model,
             train_loader,
             val_loader,
-            epochs=12,
-            patience=5,
+            epochs=8,
+            patience=3,
             restore_best_weights=True,
             monitor="val_ap",
             monitor_mode="max",
@@ -663,7 +668,12 @@ def _train_and_predict(
         collate_fn=collate_fn,
     )
 
-    model = _build_model(**params)
+    train_targets = inner_train_df["target"].values
+    n_pos = int(train_targets.sum())
+    n_neg = len(train_targets) - n_pos
+    pos_weight = n_neg / n_pos if n_pos > 0 else None
+
+    model = _build_model(pos_weight=pos_weight, **params)
     _, best_metric = train_lightning_model(
         model,
         train_loader,
