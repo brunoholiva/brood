@@ -5,6 +5,7 @@ from descriptastorus.descriptors import rdNormalizedDescriptors
 from rdkit import Chem, DataStructs
 from rdkit.Chem import MACCSkeys
 from sklearn.base import BaseEstimator, TransformerMixin
+from tqdm import tqdm
 
 
 class DescriptorTransformer(BaseEstimator, TransformerMixin):
@@ -22,7 +23,7 @@ class DescriptorTransformer(BaseEstimator, TransformerMixin):
         """Convert SMILES to (n_samples, 367) float64 descriptor matrix."""
         generator = rdNormalizedDescriptors.RDKit2DNormalized()
         vecs = []
-        for s in X:
+        for s in tqdm(X, desc="Descriptors", unit="mol", leave=True):
             mol = Chem.MolFromSmiles(s)
             if mol is None:
                 raise ValueError(f"Invalid SMILES: {s}")
