@@ -103,3 +103,58 @@ def run_cv_model(
     out.to_csv(out_path, index=False)
     logger.success(f"CV results for {model_name} saved to {out_path}")
     return out
+
+
+def run_nested_cv_model(
+    dataset: str,
+    data_dir: Path,
+    model_name: str,
+    predict_fn: Callable[[pd.DataFrame, pd.DataFrame, dict], pd.DataFrame],
+    tune_fn: Callable[[pd.DataFrame], dict],
+    n_folds: int = 5,
+) -> pd.DataFrame:
+    """Tune independently inside each outer fold and evaluate that fold."""
+    cv_folds = load_cv_folds(data_dir, dataset)
+    rows = []
+    tuned_params = {}
+    for fold in range(n_folds):
+        train_df = cv_folds[cv_folds["fold"] != fold]
+        test_df = cv_folds[cv_folds["fold"] == fold]
+        if len(train_df) == 0 or len(test_df) == 0:
+            continue
+        if train_df["target"].nunique() < 2 or test_df["target"].nunique() < 2:
+            logger.warning(
+                f"{model_name}: fold {fold} has a single class, skipping"
+            )
+            continue
+
+        logger.info(f"{model_name}: tuning outer fold {fold}")
+        params = tune_fn(train_df)
+        tuned_params[str(fold)] = params
+        preds = predict_fn(train_df, test_df, params)
+        ranking = _compute_ranking_metrics(
+            test_df["target"].to_numpy(),
+            preds["predicted_probability"].to_numpy(),
+            20.0,
+        )
+        rows.append(
+            {
+                "model": model_name,
+                "fold": fold,
+                "ap": ranking.average_precision,
+                "bedroc": ranking.bedroc,
+            }
+        )
+
+    if not rows:
+        raise RuntimeError(f"{model_name}: no usable nested CV folds")
+
+    out = pd.DataFrame(rows)
+    out_dir = data_dir / "cv" / dataset
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_dir / f"{model_name}.csv", index=False)
+    (out_dir / f"{model_name}_params.json").write_text(
+        json.dumps(tuned_params, indent=2, sort_keys=True)
+    )
+    logger.success(f"Nested CV results for {model_name} saved to {out_dir}")
+    return out

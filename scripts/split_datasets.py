@@ -27,7 +27,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from src.data_report import normalize_dataset, save_dataset_report
-from src.splitter import assign_cv_folds, scaffold_split
+from src.splitter import (
+    assign_cv_folds,
+    scaffold_split,
+    validate_partitions,
+)
 
 CV_FOLDS = 5
 
@@ -100,6 +104,7 @@ def _split_csv(
     splits_dir.mkdir(parents=True, exist_ok=True)
     report_dir = splits_dir.parent / "reports" / dataset
     save_dataset_report(df, report_dir)
+    split_checks = validate_partitions(train_df, test_df)
 
     train_df.to_csv(splits_dir / f"{dataset}_train.csv", index=False)
     test_df.to_csv(splits_dir / f"{dataset}_test.csv", index=False)
@@ -129,6 +134,7 @@ def _split_csv(
                 "distance": "mean 5-nearest Morgan-Tanimoto distance",
                 "molecules": len(manifest),
                 "test_molecules": int((manifest["partition"] == "test").sum()),
+                "split_checks": split_checks,
             },
             indent=2,
         )

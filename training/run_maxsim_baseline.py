@@ -24,8 +24,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from src.argparse_utils import build_base_arg_parser
+from src.artifacts import save_metadata
+from src.cv_utils import run_cv_model
 from src.data_utils import load_split_data, save_predictions
-from src.fingerprints import MorganFingerprintTransformer
+from src.featurizers import MorganFingerprintTransformer
 
 BATCH_SIZE = 5000
 
@@ -74,7 +76,7 @@ def main():
         data_dir / "splits" / f"{dataset}_train.csv",
         data_dir / "splits" / f"{dataset}_test.csv",
         dataset,
-        require_cluster_id=False,
+        require_scaffold=False,
     )
 
     active_mask = train_df["target"] == 1
@@ -82,6 +84,27 @@ def main():
     if len(train_actives) == 0:
         logger.error("No active molecules in training set — cannot score.")
         sys.exit(1)
+
+    if args.cv:
+
+        def _predict_fold(train_df, test_df):
+            actives = train_df[train_df["target"] == 1]
+            if len(actives) == 0:
+                raise ValueError("Fold has no actives in training set.")
+            active_fps = _build_fingerprints(actives["standardized_smiles"])
+            test_fps = _build_fingerprints(test_df["standardized_smiles"])
+            scores = _score_via_similarity(
+                test_fps, active_fps, args.batch_size
+            )
+            return pd.DataFrame(
+                {
+                    "standardized_smiles": test_df["standardized_smiles"],
+                    "predicted_probability": scores,
+                }
+            )
+
+        run_cv_model(dataset, data_dir, "similarity", _predict_fold)
+        return
 
     logger.info(
         f"{dataset}: generating fingerprints — {len(train_actives)} actives, "
@@ -108,6 +131,15 @@ def main():
 
     save_predictions(
         preds, data_dir / "predictions" / dataset, "similarity.csv"
+    )
+    save_metadata(
+        data_dir / "predictions" / dataset,
+        "similarity",
+        {
+            "model": "similarity",
+            "fingerprint": "Morgan radius=2 fp_size=512",
+            "score": "maximum Tanimoto similarity to training actives",
+        },
     )
 
 

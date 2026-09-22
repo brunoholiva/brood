@@ -8,22 +8,15 @@ and cross-validation folds are scaffold-disjoint via
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
 from loguru import logger
-from rdkit import Chem
+from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
-from sklearn.metrics.pairwise import pairwise_distances
 from sklearn.model_selection import StratifiedGroupKFold
 from tqdm import tqdm
 
 from .scaffolds import assign_scaffolds
-
-warnings.filterwarnings(
-    "ignore", message="Data was converted to boolean for metric jaccard"
-)
 
 K_NEIGHBORS = 5
 BATCH_SIZE = 5000
@@ -31,30 +24,29 @@ DEFAULT_RANDOM_STATE = 42
 
 
 def _compute_morgan_fingerprints(
-    smiles_list: list[str],
-    radius: int = 2,
-    fp_size: int = 2048,
-) -> tuple[list, np.ndarray]:
-    """Morgan fingerprints in RDKit and numpy formats."""
+    smiles_list: list[str], radius: int = 2, fp_size: int = 2048
+) -> list:
+    """Return RDKit Morgan fingerprints for distance calculations."""
     mols = [Chem.MolFromSmiles(smi) for smi in smiles_list]
     if any(mol is None for mol in mols):
         raise ValueError("Invalid SMILES encountered during fingerprinting.")
     generator = AllChem.GetMorganGenerator(radius=radius, fpSize=fp_size)
     fps_bitvect = [generator.GetFingerprint(mol) for mol in mols]
-    fps_numpy = np.array(fps_bitvect)
-    return fps_bitvect, fps_numpy
+    return fps_bitvect
 
 
 def _score_batch(batch_fps, train_fps):
     """Mean 5-NN Tanimoto distance for one batch of test molecules."""
-    dists = pairwise_distances(
-        batch_fps, train_fps, metric="jaccard", n_jobs=1
-    )
-    k = min(K_NEIGHBORS, dists.shape[1])
+    k = min(K_NEIGHBORS, len(train_fps))
     mean_dists = []
-    for row in dists:
-        nearest = np.partition(row, k - 1)[:k] if k < len(row) else row
-        mean_dists.append(nearest.mean())
+    for test_fp in batch_fps:
+        similarities = np.asarray(
+            DataStructs.BulkTanimotoSimilarity(test_fp, train_fps),
+            dtype=float,
+        )
+        distances = 1.0 - similarities
+        nearest = np.partition(distances, k - 1)[:k]
+        mean_dists.append(float(nearest.mean()))
     return mean_dists
 
 
@@ -91,17 +83,15 @@ def _score_test_set(test_smiles, test_targets, test_fps, train_fps):
 def _compute_test_distances(
     test_df: pd.DataFrame,
     train_df: pd.DataFrame,
-    fps_numpy: np.ndarray,
+    fps: list,
     smiles: list[str],
 ) -> pd.DataFrame:
     """Compute distance_to_train for test molecules and merge into test_df."""
     smiles_to_idx = {s: i for i, s in enumerate(smiles)}
-    train_fps = fps_numpy[
-        [smiles_to_idx[s] for s in train_df["standardized_smiles"]]
+    train_fps = [
+        fps[smiles_to_idx[s]] for s in train_df["standardized_smiles"]
     ]
-    test_fps = fps_numpy[
-        [smiles_to_idx[s] for s in test_df["standardized_smiles"]]
-    ]
+    test_fps = [fps[smiles_to_idx[s]] for s in test_df["standardized_smiles"]]
 
     test_dist_df = _score_test_set(
         test_df["standardized_smiles"].tolist(),
@@ -139,6 +129,35 @@ def _require_scaffold(df: pd.DataFrame) -> pd.DataFrame:
             f"found {n_scaffolds}."
         )
     return df
+
+
+def validate_partitions(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    label_shift_tolerance: float = 0.1,
+) -> dict:
+    """Check scaffold leakage and report binary-label distribution shift."""
+    overlap = set(train_df["scaffold"]) & set(test_df["scaffold"])
+    if overlap:
+        raise ValueError(
+            f"Scaffold leakage detected: {len(overlap)} shared scaffolds"
+        )
+    train_fraction = float(train_df["target"].mean())
+    test_fraction = float(test_df["target"].mean())
+    shift = abs(train_fraction - test_fraction)
+    if shift > label_shift_tolerance:
+        logger.warning(
+            "Label distribution shift: train={:.1%}, test={:.1%}, "
+            "absolute difference={:.1%}".format(
+                train_fraction, test_fraction, shift
+            )
+        )
+    return {
+        "scaffold_overlap": len(overlap),
+        "train_active_fraction": train_fraction,
+        "test_active_fraction": test_fraction,
+        "absolute_label_shift": shift,
+    }
 
 
 def _shuffle_split_by_scaffold(
@@ -240,7 +259,7 @@ def scaffold_split(
 
     logger.info("Generating Morgan fingerprints for distance scoring...")
     smiles = df["standardized_smiles"].tolist()
-    _, fps_numpy = _compute_morgan_fingerprints(smiles)
+    fps = _compute_morgan_fingerprints(smiles)
 
     groups = df["scaffold"].to_numpy()
     targets = df["target"].to_numpy()
@@ -275,6 +294,7 @@ def scaffold_split(
 
     train_df = df.iloc[train_idx].copy()
     test_df = df.iloc[test_idx].copy()
+    validate_partitions(train_df, test_df)
 
     logger.info(
         f"Split: train={len(train_df)} ({train_df['scaffold'].nunique()} "
@@ -283,7 +303,7 @@ def scaffold_split(
     )
 
     logger.info("Computing distance_to_train for test molecules...")
-    test_df = _compute_test_distances(test_df, train_df, fps_numpy, smiles)
+    test_df = _compute_test_distances(test_df, train_df, fps, smiles)
     train_df, test_df = _format_output(train_df, test_df)
 
     logger.info(f"Scoring done: {len(test_df)} test molecules")
@@ -292,7 +312,7 @@ def scaffold_split(
 
 def assign_cv_folds(
     df: pd.DataFrame,
-    n_splits: int = 3,
+    n_splits: int = 5,
     random_state: int = DEFAULT_RANDOM_STATE,
 ) -> pd.DataFrame:
     """Assign scaffold-disjoint CV fold labels to a DataFrame.
@@ -333,4 +353,8 @@ def assign_cv_folds(
 
     out = df.copy()
     out["fold"] = fold
+    for fold_id in range(n_splits):
+        validate_partitions(
+            out[out["fold"] != fold_id], out[out["fold"] == fold_id]
+        )
     return out

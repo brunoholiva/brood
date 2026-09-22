@@ -1,0 +1,36 @@
+# Pipeline definition for the supported benchmark models.
+
+defaults:
+  n_trials: 20
+  random_state: 42
+
+datasets:
+  stokes:
+    models:
+      rf:
+        env: brood
+        tune: true
+        output: rf.csv
+      similarity:
+        env: brood
+        output: similarity.csv
+
+  chembl_ecoli:
+    models:
+      rf:
+        env: brood
+        tune: true
+        output: rf.csv
+      similarity:
+        env: brood
+        output: similarity.csv
+
+  GNEtolC:
+    models:
+      rf:
+        env: brood
+        tune: true
+        output: rf.csv
+      similarity:
+        env: brood
+        output: similarity.csv
