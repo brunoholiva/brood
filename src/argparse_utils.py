@@ -42,6 +42,11 @@ def build_base_arg_parser(
         help="Run Optuna hyperparameter tuning before final training",
     )
     parser.add_argument(
+        "--cv",
+        action="store_true",
+        help="Run scaffold CV evaluation (5 folds) into data/cv",
+    )
+    parser.add_argument(
         "--n-trials",
         type=int,
         default=30,

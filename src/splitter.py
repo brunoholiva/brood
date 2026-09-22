@@ -1,19 +1,25 @@
-"""Distance-based OOD splitting using Taylor-Butina or Leader clustering.
+"""Scaffold-based OOD splitting and CV fold assignment.
 
-For datasets < 50k: exact Butina sphere-exclusion (all-pairs distances).
-For datasets >= 50k: Leader algorithm (streaming, O(n x k) memory).
+Molecules are grouped by their generic Murcko scaffold. The held-out
+test set is one scaffold-disjoint, label-stratified slice (default 10%),
+and cross-validation folds are scaffold-disjoint via
+:class:`StratifiedGroupKFold`.
 """
+
+from __future__ import annotations
 
 import warnings
 
 import numpy as np
 import pandas as pd
 from loguru import logger
-from rdkit import Chem, DataStructs
+from rdkit import Chem
 from rdkit.Chem import AllChem
-from rdkit.ML.Cluster import Butina
 from sklearn.metrics.pairwise import pairwise_distances
+from sklearn.model_selection import StratifiedGroupKFold
 from tqdm import tqdm
+
+from .scaffolds import assign_scaffolds
 
 warnings.filterwarnings(
     "ignore", message="Data was converted to boolean for metric jaccard"
@@ -21,24 +27,7 @@ warnings.filterwarnings(
 
 K_NEIGHBORS = 5
 BATCH_SIZE = 5000
-LARGE_DATASET_THRESHOLD = 50000
-
-
-def _smiles_to_mols(smiles_list: list[str]) -> list[Chem.Mol]:
-    mols = []
-    for smi in smiles_list:
-        mol = Chem.MolFromSmiles(smi)
-        if mol is not None:
-            mols.append(mol)
-    return mols
-
-
-def _validate_mols(mols: list, expected_count: int) -> None:
-    if len(mols) != expected_count:
-        raise ValueError(
-            f"Invalid SMILES: {expected_count - len(mols)} molecules "
-            "could not be parsed."
-        )
+DEFAULT_RANDOM_STATE = 42
 
 
 def _compute_morgan_fingerprints(
@@ -47,208 +36,13 @@ def _compute_morgan_fingerprints(
     fp_size: int = 2048,
 ) -> tuple[list, np.ndarray]:
     """Morgan fingerprints in RDKit and numpy formats."""
-    mols = _smiles_to_mols(smiles_list)
-    _validate_mols(mols, len(smiles_list))
-
+    mols = [Chem.MolFromSmiles(smi) for smi in smiles_list]
+    if any(mol is None for mol in mols):
+        raise ValueError("Invalid SMILES encountered during fingerprinting.")
     generator = AllChem.GetMorganGenerator(radius=radius, fpSize=fp_size)
     fps_bitvect = [generator.GetFingerprint(mol) for mol in mols]
     fps_numpy = np.array(fps_bitvect)
-
     return fps_bitvect, fps_numpy
-
-
-def _butina_cluster(
-    fps_bitvect: list,
-    threshold: float,
-) -> np.ndarray:
-    """Butina sphere-exclusion via all-pairs distance matrix (n < 50k)."""
-    n = len(fps_bitvect)
-    if n == 0:
-        return np.array([], dtype=int)
-    if n == 1:
-        return np.array([0], dtype=int)
-
-    dists = []
-    for i in range(1, n):
-        sims = DataStructs.BulkTanimotoSimilarity(
-            fps_bitvect[i], fps_bitvect[:i]
-        )
-        dists.extend([1.0 - s for s in sims])
-
-    clusters = Butina.ClusterData(dists, n, threshold, isDistData=True)
-
-    cluster_ids = np.zeros(n, dtype=int)
-    sorted_clusters = sorted(clusters, key=lambda c: -len(c))
-    for cluster_id, cluster_members in enumerate(sorted_clusters):
-        for mol_idx in cluster_members:
-            cluster_ids[mol_idx] = cluster_id
-
-    return cluster_ids
-
-
-def _leader_cluster(
-    fps_bitvect: list,
-    threshold: float,
-) -> np.ndarray:
-    """Streaming sphere-exclusion (Leader algorithm). O(n x k) memory.
-
-    Each molecule is compared only to existing cluster centroids, not
-    the full pairwise matrix. Used for n >= 50k.
-    """
-    n = len(fps_bitvect)
-    if n == 0:
-        return np.array([], dtype=int)
-    if n == 1:
-        return np.array([0], dtype=int)
-
-    sim_cutoff = 1.0 - threshold
-
-    clusters: list[list[int]] = []
-    centroids: list[DataStructs.ExplicitBitVect] = []
-
-    for i, fps in enumerate(fps_bitvect):
-        assigned = False
-        for c_idx, centroid_fps in enumerate(centroids):
-            sim = DataStructs.TanimotoSimilarity(fps, centroid_fps)
-            if sim >= sim_cutoff:
-                clusters[c_idx].append(i)
-                assigned = True
-                break
-        if not assigned:
-            clusters.append([i])
-            centroids.append(fps)
-
-    sorted_clusters = sorted(clusters, key=lambda c: -len(c))
-
-    cluster_ids = np.zeros(n, dtype=int)
-    for cid, members in enumerate(sorted_clusters):
-        for idx in members:
-            cluster_ids[idx] = cid
-
-    return cluster_ids
-
-
-def _cluster_from_fps(fps_bitvect: list, threshold: float) -> np.ndarray:
-    """Dispatch to Butina or Leader clustering by dataset size."""
-    if len(fps_bitvect) >= LARGE_DATASET_THRESHOLD:
-        logger.info(
-            f"{len(fps_bitvect)} molecules >= {LARGE_DATASET_THRESHOLD}, "
-            "using Leader clustering (streaming)"
-        )
-        return _leader_cluster(fps_bitvect, threshold)
-    return _butina_cluster(fps_bitvect, threshold)
-
-
-def butina_cluster(
-    smiles_list: list[str],
-    threshold: float = 0.65,
-    radius: int = 2,
-    fp_size: int = 2048,
-) -> np.ndarray:
-    """Cluster molecules using sphere-exclusion (Butina / Leader).
-
-    Returns cluster IDs ordered by descending size.
-    Uses Leader algorithm for datasets >= 50k.
-    """
-    fps_bitvect, _ = _compute_morgan_fingerprints(
-        smiles_list, radius=radius, fp_size=fp_size
-    )
-    return _cluster_from_fps(fps_bitvect, threshold)
-
-
-def _accumulate_clusters(
-    cluster_sizes: pd.Series,
-    n_target: int,
-) -> list:
-    """Greedily accumulate smallest clusters up to n_target molecules."""
-    selected = []
-    cum = 0
-    for cid, size in cluster_sizes.items():
-        if cum + size <= n_target:
-            selected.append(cid)
-            cum += size
-        else:
-            break
-    return selected
-
-
-def split_train_test(
-    df: pd.DataFrame,
-    train_size: float = 0.8,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split DataFrame by cluster ID into train/test partitions.
-
-    Smallest clusters go to test, largest go to training.
-    """
-    cluster_sizes = df.groupby("cluster_id").size().sort_values(ascending=True)
-    n_total = len(df)
-    n_test = int((1.0 - train_size) * n_total)
-    test_clusters = _accumulate_clusters(cluster_sizes, n_test)
-    train_clusters = list(cluster_sizes.drop(test_clusters).index)
-
-    train_df = df[df["cluster_id"].isin(train_clusters)].copy()
-    test_df = df[df["cluster_id"].isin(test_clusters)].copy()
-
-    logger.info(
-        f"Split: train={len(train_df)} ({len(train_clusters)} clusters), "
-        f"test={len(test_df)} ({len(test_clusters)} clusters)"
-    )
-    return train_df, test_df
-
-
-def split_train_valid_test(
-    df: pd.DataFrame,
-    train_size: float = 0.8,
-    valid_size: float = 0.1,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split DataFrame by cluster ID into train/valid/test partitions.
-
-    Smallest clusters go to test/valid, largest go to training.
-    """
-    test_size = 1.0 - train_size - valid_size
-    cluster_sizes = df.groupby("cluster_id").size().sort_values(ascending=True)
-    n_total = len(df)
-    test_clusters = _accumulate_clusters(
-        cluster_sizes, int(test_size * n_total)
-    )
-    remaining = cluster_sizes.drop(test_clusters)
-    valid_clusters = _accumulate_clusters(remaining, int(valid_size * n_total))
-    train_clusters = list(remaining.drop(valid_clusters).index)
-
-    train_df = df[df["cluster_id"].isin(train_clusters)].copy()
-    valid_df = df[df["cluster_id"].isin(valid_clusters)].copy()
-    test_df = df[df["cluster_id"].isin(test_clusters)].copy()
-
-    logger.info(
-        f"Split: train={len(train_df)} ({len(train_clusters)} clusters), "
-        f"valid={len(valid_df)} ({len(valid_clusters)} clusters), "
-        f"test={len(test_df)} ({len(test_clusters)} clusters)"
-    )
-    return train_df, valid_df, test_df
-
-
-def split_by_clusters(
-    df: pd.DataFrame,
-    train_size: float = 0.8,
-    valid_size: float | None = None,
-) -> tuple[pd.DataFrame, ...]:
-    """Split DataFrame by cluster ID for OOD train/(valid)/test partitions.
-
-    .. deprecated::
-        Use :func:`split_train_test` or :func:`split_train_valid_test` instead.
-    """
-    if valid_size is not None:
-        return split_train_valid_test(df, train_size, valid_size)
-    return split_train_test(df, train_size)
-
-
-def _assign_clusters(
-    df: pd.DataFrame, cluster_ids: np.ndarray
-) -> pd.DataFrame:
-    """Add cluster_id column to DataFrame copy."""
-    full_df = df.copy()
-    full_df["cluster_id"] = cluster_ids
-    return full_df
 
 
 def _score_batch(batch_fps, train_fps):
@@ -314,7 +108,7 @@ def _compute_test_distances(
         test_df["target"].tolist(),
         test_fps,
         train_fps,
-    )
+    ).drop_duplicates(subset=["standardized_smiles"])
 
     return test_df.merge(
         test_dist_df[["standardized_smiles", "distance_to_train"]],
@@ -328,51 +122,215 @@ def _format_output(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Select final columns for output."""
     test_df = test_df[
-        ["standardized_smiles", "target", "cluster_id", "distance_to_train"]
+        ["standardized_smiles", "target", "scaffold", "distance_to_train"]
     ]
-    train_df = train_df[["standardized_smiles", "target", "cluster_id"]]
+    train_df = train_df[["standardized_smiles", "target", "scaffold"]]
     return train_df, test_df
 
 
-def taylor_butina_split(
-    df,
-    train_size=0.8,
-    threshold=0.65,
+def _require_scaffold(df: pd.DataFrame) -> pd.DataFrame:
+    """Validate scaffold grouping, assigning it if necessary."""
+    if "scaffold" not in df.columns:
+        df = assign_scaffolds(df)
+    n_scaffolds = df["scaffold"].nunique()
+    if n_scaffolds < 2:
+        raise ValueError(
+            f"Need at least 2 distinct scaffolds for a scaffold split, "
+            f"found {n_scaffolds}."
+        )
+    return df
+
+
+def _shuffle_split_by_scaffold(
+    df: pd.DataFrame,
+    test_size: float,
+    random_state: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """OOD train/test split using Taylor-Butina clustering.
+    """Random scaffold-disjoint split of a DataFrame.
 
-    1. Clusters molecules by structural similarity (Butina / Leader)
-    2. Largest clusters -> training, smallest -> test
-    3. Computes ``distance_to_train`` for test (mean 5-NN Tanimoto dist)
+    Randomly holds out ``test_size`` of the scaffolds (group-disjoint).
+    """
+    if not (0.0 < test_size < 1.0):
+        raise ValueError(f"test_size must be in (0, 1), got {test_size}.")
 
-    Uses Leader algorithm (streaming) for datasets >= 50k.
+    groups = df["scaffold"].to_numpy()
+    scaffold_ids = np.unique(groups)
+    n_groups = len(scaffold_ids)
+    if n_groups < 2:
+        raise ValueError(
+            f"Need at least 2 distinct scaffolds, found {n_groups}."
+        )
+
+    n_test = max(1, min(n_groups - 1, int(round(test_size * n_groups))))
+    rng = np.random.default_rng(random_state)
+    test_scaffolds = rng.choice(scaffold_ids, size=n_test, replace=False)
+    test_mask = np.isin(groups, test_scaffolds)
+    return df.iloc[~test_mask].copy(), df.iloc[test_mask].copy()
+
+
+def split_train_test(
+    df: pd.DataFrame,
+    train_size: float = 0.8,
+    random_state: int = DEFAULT_RANDOM_STATE,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split a scaffold-annotated DataFrame into train/test by scaffold."""
+    df = _require_scaffold(df)
+    return _shuffle_split_by_scaffold(
+        df, test_size=1.0 - train_size, random_state=random_state
+    )
+
+
+def split_train_valid_test(
+    df: pd.DataFrame,
+    train_size: float = 0.8,
+    valid_size: float = 0.1,
+    random_state: int = DEFAULT_RANDOM_STATE,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split a scaffold-annotated DataFrame into train/valid/test."""
+    df = _require_scaffold(df)
+    test_size = 1.0 - train_size - valid_size
+    rest_df, test_df = _shuffle_split_by_scaffold(
+        df, test_size=test_size, random_state=random_state
+    )
+    valid_df, train_df = _shuffle_split_by_scaffold(
+        rest_df,
+        test_size=valid_size / (1.0 - test_size),
+        random_state=random_state,
+    )
+    return train_df, valid_df, test_df
+
+
+def scaffold_split(
+    df: pd.DataFrame,
+    test_frac: float = 0.1,
+    random_state: int = DEFAULT_RANDOM_STATE,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """OOD train/test split by generic Murcko scaffold.
+
+    1. Groups molecules by generic Murcko scaffold.
+    2. Carves a label-stratified, scaffold-disjoint held-out test
+       (``test_frac``) with :class:`StratifiedGroupKFold`.
+    3. Computes ``distance_to_train`` for test (mean 5-NN Tanimoto dist).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with ``standardized_smiles`` and ``target`` columns.
+    test_frac : float
+        Target fraction of molecules held out as test. Scaffolds remain
+        indivisible, so the achieved fraction may differ slightly.
+    random_state : int
+        Seed for deterministic fold assignment.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        (train_df, test_df) with a ``scaffold`` column in both, plus
+        ``distance_to_train`` in the test set.
     """
     if len(df) == 0:
         raise ValueError("Cannot split an empty DataFrame.")
+    for col in ("standardized_smiles", "target"):
+        if col not in df.columns:
+            raise KeyError(f"'{col}' column is required.")
+    if not (0.0 < test_frac < 1.0):
+        raise ValueError(f"test_frac must be in (0, 1), got {test_frac}.")
 
+    df = _require_scaffold(df)
+
+    logger.info("Generating Morgan fingerprints for distance scoring...")
     smiles = df["standardized_smiles"].tolist()
+    _, fps_numpy = _compute_morgan_fingerprints(smiles)
 
-    logger.info("Running Taylor-Butina clustering")
-    logger.info("Generating Morgan fingerprints...")
-    fps_bitvect, fps_numpy = _compute_morgan_fingerprints(smiles)
+    groups = df["scaffold"].to_numpy()
+    targets = df["target"].to_numpy()
+    n_groups = len(set(groups))
+    n_splits = max(2, min(10, int(round(1.0 / test_frac))))
+    min_class_count = min(np.bincount(targets))
+    n_splits = min(n_splits, n_groups, min_class_count)
+    if n_splits < 2:
+        raise ValueError(
+            "Cannot scaffold-split: too few scaffolds or too few "
+            "members per class."
+        )
 
-    logger.info("Clustering...")
-    cluster_ids = _cluster_from_fps(fps_bitvect, threshold)
-    n_clusters = len(set(cluster_ids))
+    # StratifiedGroupKFold gives feasible scaffold-disjoint candidates, but
+    # its first fold is not guaranteed to contain 10% of the molecules.
+    # Choose the candidate closest to the requested molecule fraction.
+    candidates = []
+    for seed in range(random_state, random_state + 32):
+        kfold = StratifiedGroupKFold(
+            n_splits=n_splits, shuffle=True, random_state=seed
+        )
+        for train_candidate, test_candidate in kfold.split(
+            df, targets, groups
+        ):
+            test_fraction = len(test_candidate) / len(df)
+            active_fraction = targets[test_candidate].mean()
+            score = abs(test_fraction - test_frac) + 0.25 * abs(
+                active_fraction - targets.mean()
+            )
+            candidates.append((score, train_candidate, test_candidate))
+    _, train_idx, test_idx = min(candidates, key=lambda item: item[0])
 
-    full_df = _assign_clusters(df, cluster_ids)
-    train_df, test_df = split_train_test(full_df, train_size=train_size)
+    train_df = df.iloc[train_idx].copy()
+    test_df = df.iloc[test_idx].copy()
 
     logger.info(
-        f"Clustering done: {n_clusters} clusters, "
-        f"train={len(train_df)}, test={len(test_df)}"
+        f"Split: train={len(train_df)} ({train_df['scaffold'].nunique()} "
+        f"scaffolds), test={len(test_df)} "
+        f"({test_df['scaffold'].nunique()} scaffolds)"
     )
 
     logger.info("Computing distance_to_train for test molecules...")
     test_df = _compute_test_distances(test_df, train_df, fps_numpy, smiles)
-
     train_df, test_df = _format_output(train_df, test_df)
 
     logger.info(f"Scoring done: {len(test_df)} test molecules")
-
     return train_df, test_df
+
+
+def assign_cv_folds(
+    df: pd.DataFrame,
+    n_splits: int = 3,
+    random_state: int = DEFAULT_RANDOM_STATE,
+) -> pd.DataFrame:
+    """Assign scaffold-disjoint CV fold labels to a DataFrame.
+
+    Adds a ``fold`` column with integer fold IDs (0..n_splits-1) via
+    :class:`StratifiedGroupKFold`. Using one assignment for all models
+    guarantees identical fold partitions across models.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with ``scaffold`` and ``target`` columns.
+    n_splits : int
+        Number of CV folds.
+    random_state : int
+        Seed for deterministic fold assignment.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of ``df`` with a ``fold`` column.
+    """
+    df = _require_scaffold(df)
+    n_groups = df["scaffold"].nunique()
+    min_class_count = min(np.bincount(df["target"].to_numpy()))
+    if n_splits > n_groups or n_splits > min_class_count:
+        n_splits = min(n_splits, n_groups, min_class_count)
+        logger.warning(f"Reducing CV folds to {n_splits} for this dataset.")
+
+    groups = df["scaffold"].to_numpy()
+    targets = df["target"].to_numpy()
+    kfold = StratifiedGroupKFold(
+        n_splits=n_splits, shuffle=True, random_state=random_state
+    )
+    fold = np.zeros(len(df), dtype=int)
+    for fold_id, (_, val_idx) in enumerate(kfold.split(df, targets, groups)):
+        fold[val_idx] = fold_id
+
+    out = df.copy()
+    out["fold"] = fold
+    return out
