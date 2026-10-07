@@ -111,6 +111,15 @@ REPRESENTATION_REGISTRY: dict[str, Representation] = {
         env="chemeleon",
         label="CheMeleon",
     ),
+    "minimol": Representation(
+        name="minimol",
+        module="brood.representations.minimol",
+        class_name="MinimolFingerprint",
+        default_kwargs={},
+        dims=512,
+        env="minimol",
+        label="Minimol",
+    ),
 }
 
 
