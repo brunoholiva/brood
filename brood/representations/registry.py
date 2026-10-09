@@ -21,18 +21,12 @@ class Representation:
         Transformer class name inside that module.
     default_kwargs : dict
         Default constructor kwargs (e.g. fingerprint radius/size).
-    dims : int or None
-        Output dimension, when known and fixed.
-    env : str or None
-        Conda env required for this representation, if not the base one.
     """
 
     name: str
     module: str
     class_name: str
     default_kwargs: dict[str, Any]
-    dims: int | None = None
-    env: str | None = None
     label: str | None = None
 
 
@@ -43,7 +37,6 @@ REPRESENTATION_REGISTRY: dict[str, Representation] = {
         module="brood.representations.morgan",
         class_name="MorganFingerprintTransformer",
         default_kwargs={"radius": 2, "fp_size": 512},
-        dims=512,
         label="Morgan\n512",
     ),
     "morgan2048": Representation(
@@ -51,7 +44,6 @@ REPRESENTATION_REGISTRY: dict[str, Representation] = {
         module="brood.representations.morgan",
         class_name="MorganFingerprintTransformer",
         default_kwargs={"radius": 2, "fp_size": 2048},
-        dims=2048,
         label="Morgan\n2048",
     ),
     "maccs": Representation(
@@ -59,7 +51,6 @@ REPRESENTATION_REGISTRY: dict[str, Representation] = {
         module="brood.representations.maccs",
         class_name="MACCSFingerprintTransformer",
         default_kwargs={},
-        dims=167,
         label="MACCS",
     ),
     "rdkit2d": Representation(
@@ -67,39 +58,13 @@ REPRESENTATION_REGISTRY: dict[str, Representation] = {
         module="brood.representations.rdkit2d",
         class_name="RDKit2DDescriptorTransformer",
         default_kwargs={},
-        dims=200,
         label="RDKit2D",
-    ),
-    "physchem": Representation(
-        name="physchem",
-        module="brood.representations.descriptors",
-        class_name="PhysChemDescriptorTransformer",
-        default_kwargs={},
-    ),
-    "topological": Representation(
-        name="topological",
-        module="brood.representations.descriptors",
-        class_name="TopologicalDescriptorTransformer",
-        default_kwargs={},
-    ),
-    "estate": Representation(
-        name="estate",
-        module="brood.representations.descriptors",
-        class_name="EStateDescriptorTransformer",
-        default_kwargs={},
-    ),
-    "autocorr2d": Representation(
-        name="autocorr2d",
-        module="brood.representations.descriptors",
-        class_name="Autocorr2DTransformer",
-        default_kwargs={},
     ),
     "morgan_maccs_rdkit2d": Representation(
         name="morgan_maccs_rdkit2d",
         module="brood.representations.combined",
         class_name="MoleculeFeaturizer",
         default_kwargs={"fp_size": 512},
-        dims=879,
         label="Morgan\n+MACCS\n+RDKit2D",
     ),
     "chemeleon": Representation(
@@ -107,8 +72,6 @@ REPRESENTATION_REGISTRY: dict[str, Representation] = {
         module="brood.representations.chemeleon",
         class_name="CheMeleonFingerprint",
         default_kwargs={},
-        dims=2048,
-        env="chemeleon",
         label="CheMeleon",
     ),
     "minimol": Representation(
@@ -116,8 +79,6 @@ REPRESENTATION_REGISTRY: dict[str, Representation] = {
         module="brood.representations.minimol",
         class_name="MinimolFingerprint",
         default_kwargs={},
-        dims=512,
-        env="minimol",
         label="Minimol",
     ),
 }
@@ -155,9 +116,3 @@ def get_representation(name: str, **kwargs: Any):
         )
     cls = _load(rep.module, rep.class_name)
     return cls(**{**rep.default_kwargs, **kwargs})
-
-
-def representation_env(name: str) -> str | None:
-    """Return the special conda env required for a representation, if any."""
-    rep = REPRESENTATION_REGISTRY.get(name)
-    return rep.env if rep else None
