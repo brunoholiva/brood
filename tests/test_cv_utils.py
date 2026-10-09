@@ -28,9 +28,9 @@ def cv_folds_dir(tmp_path):
     ]
     df = pd.DataFrame({"standardized_smiles": smis, "target": [0, 1] * 6})
     cv = assign_cv_folds(df, n_splits=3)
-    splits = tmp_path / "splits"
-    splits.mkdir()
-    cv.to_csv(splits / "test_cv_folds.csv", index=False)
+    splits = tmp_path / "splits" / "test"
+    splits.mkdir(parents=True)
+    cv.to_csv(splits / "cv_folds.csv", index=False)
     return tmp_path
 
 
@@ -61,7 +61,7 @@ def test_run_cv_model_writes_rows(cv_folds_dir):
     assert (
         len(raw)
         == len(
-            cv_folds_dir.joinpath("splits", "test_cv_folds.csv")
+            cv_folds_dir.joinpath("splits", "test", "cv_folds.csv")
             .read_text()
             .splitlines()
         )
@@ -72,9 +72,9 @@ def test_run_cv_model_writes_rows(cv_folds_dir):
 
 def test_load_params_overrides_defaults(cv_folds_dir):
     """Saved tuned params override defaults when present."""
-    preds_dir = cv_folds_dir / "predictions" / "test"
-    preds_dir.mkdir(parents=True)
-    (preds_dir / "rf_params.json").write_text(json.dumps({"kbest__k": 42}))
+    run_dir = cv_folds_dir / "runs" / "test" / "rf"
+    run_dir.mkdir(parents=True)
+    (run_dir / "params.json").write_text(json.dumps({"kbest__k": 42}))
 
     params = load_params(
         cv_folds_dir, "test", "rf", {"kbest__k": 512, "var__threshold": 0.01}

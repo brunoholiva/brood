@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.evaluator import _compute_by_bin, _compute_global, evaluate
+from brood.evaluation.evaluator import (
+    _compute_by_bin,
+    _compute_global,
+    evaluate,
+)
 
 N = 100
 NP_RNG = np.random.default_rng(42)
@@ -187,8 +191,8 @@ class TestIntegration:
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.pipeline import Pipeline
 
-        from src.fingerprints import MorganFingerprintTransformer
-        from src.splitter import taylor_butina_split
+        from brood.data.splitter import scaffold_split
+        from brood.representations.morgan import MorganFingerprintTransformer
 
         smiles = [
             "CCO",
@@ -204,7 +208,7 @@ class TestIntegration:
         ]
         targets = [0, 0, 0, 1, 1, 1, 0, 0, 1, 0]
         df = pd.DataFrame({"standardized_smiles": smiles, "target": targets})
-        train_df, test_df = taylor_butina_split(df)
+        train_df, test_df = scaffold_split(df)
 
         pipe = Pipeline(
             [
@@ -221,6 +225,7 @@ class TestIntegration:
 
         assert result.global_.average_precision >= 0
         assert result.global_.bedroc >= 0
+        assert result.global_.brier >= 0
         for entry in result.by_bin:
             assert entry.n >= 0
 
@@ -235,6 +240,7 @@ class TestComputeHelpers:
         assert hasattr(result, "n")
         assert hasattr(result, "average_precision")
         assert hasattr(result, "bedroc")
+        assert hasattr(result, "brier")
         assert result.n == len(perfect_df)
 
     def test_compute_by_bin_returns_list(self, random_df):

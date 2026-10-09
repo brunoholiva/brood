@@ -1,0 +1,269 @@
+"""Tests for CV plots derived from raw fold predictions."""
+
+import logging
+import sys
+
+import numpy as np
+import pandas as pd
+import pytest
+from statsmodels.stats.libqsturng import qsturng
+
+from brood.plotting.cv_comparison import (
+    _blocked_test,
+    _fold_table,
+    _load_cv_metrics,
+    _model_color,
+    _split_model,
+    _warn_on_incomplete_folds,
+)
+from brood.plotting.style import LEARNER_COLORS
+
+
+def test_cv_metrics_are_loaded_from_run_metrics(tmp_path):
+    path = tmp_path / "runs" / "demo" / "rf" / "metrics"
+    path.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "model": ["rf", "rf"],
+            "fold": [0, 1],
+            "ap": [0.4, 0.6],
+            "bedroc": [0.3, 0.5],
+            "brier": [0.2, 0.15],
+        }
+    ).to_csv(path / "cv.csv", index=False)
+
+    metrics = _load_cv_metrics(tmp_path, "demo")
+
+    assert list(metrics.columns) == ["model", "fold", "ap", "bedroc", "brier"]
+    assert len(metrics) == 2
+    assert metrics["brier"].notna().all()
+
+
+def test_blocked_tukey_uses_model_by_fold_error_term():
+    metrics = pd.DataFrame(
+        {
+            "fold": [0, 1, 2, 3] * 3,
+            "model": ["a"] * 4 + ["b"] * 4 + ["c"] * 4,
+            "ap": [
+                0.10,
+                0.20,
+                0.30,
+                0.40,
+                0.12,
+                0.24,
+                0.28,
+                0.43,
+                0.50,
+                0.44,
+                0.62,
+                0.57,
+            ],
+        }
+    )
+
+    table = _fold_table(metrics, "ap")
+    means, half_width, omnibus_p = _blocked_test(table)
+    values = table.to_numpy()
+    model_means = table.mean(axis=0).to_numpy()
+    fold_means = table.mean(axis=1).to_numpy()
+    residual = (
+        values - fold_means[:, None] - model_means[None, :] + values.mean()
+    )
+    error_df = 2 * 3
+    error_mse = (residual**2).sum() / error_df
+    expected_q = qsturng(0.95, 3, error_df)
+    expected_half_width = expected_q * np.sqrt(error_mse / 4) / 2
+
+    np.testing.assert_allclose(means.to_numpy(), model_means)
+    np.testing.assert_allclose(half_width, expected_half_width, rtol=2e-3)
+    assert omnibus_p < 0.05
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("tabpfn_morgan512", ("tabpfn", "morgan512")),
+        ("rf_morgan_maccs_rdkit2d", ("rf", "morgan_maccs_rdkit2d")),
+        ("chemprop", ("chemprop", "")),
+        ("similarity", ("similarity", "")),
+    ],
+)
+def test_split_model(name, expected):
+    assert _split_model(name) == expected
+
+
+def test_every_known_learner_gets_its_family_colour():
+    """Regression: a missing representation suffix used to send chemprop and
+    similarity to the unknown-run grey, so they looked identical in every
+    figure and vanished from the leaderboard legend."""
+    runs = [
+        "chemprop",
+        "similarity",
+        "tabpfn_morgan2048",
+        "rf_morgan2048",
+        "lgbm_morgan2048",
+        "logreg_morgan2048",
+    ]
+    colors = [_model_color(run) for run in runs]
+    assert len(set(colors)) == len(runs)
+    for run in runs:
+        assert _model_color(run) == LEARNER_COLORS[_split_model(run)[0]]
+
+
+def test_incomplete_runs_are_reported_not_silently_dropped(caplog):
+    """A run missing folds/models would shrink the paired comparison."""
+    metrics = pd.DataFrame(
+        {
+            "fold": [0, 1, 2, 3] * 2 + [0, 1],
+            "model": ["a"] * 4 + ["b"] * 4 + ["c"] * 2,
+            "ap": [0.1, 0.2, 0.3, 0.4, 0.15, 0.25, 0.35, 0.45, 0.2, 0.3],
+        }
+    )
+
+    table = _fold_table(metrics, "ap")
+    with caplog.at_level(
+        logging.WARNING, logger="brood.plotting.cv_comparison"
+    ):
+        _warn_on_incomplete_folds(metrics, table)
+
+    assert table.shape == (2, 3)
+    assert "runs with incomplete folds: c=2/4" in caplog.text
+    assert "folds dropped from every model: [2, 3]" in caplog.text
+
+
+def test_main_renders_both_figures(tmp_path, monkeypatch):
+    """Regression: main() used to crash when --chosen was not passed."""
+    import brood.plotting.cv_comparison as plot_mod
+
+    rows = [
+        {"model": model, "fold": fold, "ap": 0.1 * i + 0.01 * fold}
+        for i, model in enumerate(
+            [
+                "similarity",
+                "rf_maccs",
+                "rf_rdkit2d",
+                "tabpfn_maccs",
+                "tabpfn_rdkit2d",
+            ]
+        )
+        for fold in (0, 1, 2)
+    ]
+    monkeypatch.setattr(
+        plot_mod,
+        "_load_cv_metrics",
+        lambda data_dir, dataset, models=None: pd.DataFrame(rows),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "plot_cv_comparison.py",
+            "--dataset",
+            "demo",
+            "--data-dir",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    plot_mod.main()
+
+    out = tmp_path / "out" / "demo" / "cv"
+    assert (out / "demo_cv_ap.svg").exists()
+    assert (out / "demo_cv_representation.svg").exists()
+    assert (out / "demo_cv_representation_ap.svg").exists()
+
+
+def test_skip_leaderboard_draws_only_the_representation_figure(
+    tmp_path, monkeypatch
+):
+    """Regression: the representation stage must not redraw figure 1.
+
+    Both figures live in the same ``<dataset>/cv`` directory, so a stage that
+    renders figure 2 without claiming figure 1 silently overwrites the
+    screening leaderboard with representation models.
+    """
+    import brood.plotting.cv_comparison as plot_mod
+
+    rows = [
+        {"model": model, "fold": fold, "ap": 0.1 * i + 0.01 * fold}
+        for i, model in enumerate(
+            ["similarity", "rf_maccs", "tabpfn_maccs", "tabpfn_rdkit2d"]
+        )
+        for fold in (0, 1, 2)
+    ]
+    monkeypatch.setattr(
+        plot_mod,
+        "_load_cv_metrics",
+        lambda data_dir, dataset, models=None: pd.DataFrame(rows),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "plot_cv_comparison.py",
+            "--dataset",
+            "demo",
+            "--data-dir",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--skip-leaderboard",
+        ],
+    )
+
+    plot_mod.main()
+
+    out = tmp_path / "out" / "demo" / "cv"
+    assert not (out / "demo_cv_ap.svg").exists()
+    assert (out / "demo_cv_representation.svg").exists()
+    assert (out / "demo_cv_representation_ap.svg").exists()
+
+
+def test_blocked_test_on_a_pair_matches_the_full_comparison_estimator():
+    """Fig 2's per-group test must reuse fig 1's estimator, not a new one."""
+    table = pd.DataFrame(
+        {"a": [0.1, 0.2, 0.3, 0.4], "b": [0.2, 0.1, 0.4, 0.3], "c": [0.3] * 4},
+        index=range(4),
+    )
+    means, hw, p = _blocked_test(table)
+    pair_means, pair_hw, _ = _blocked_test(table[["a", "b"]])
+    assert list(pair_means) == [means["a"], means["b"]]
+    assert 0 < pair_hw < hw
+    assert means["c"] == pytest.approx(0.3)
+    assert 0 <= p <= 1
+
+
+def test_representation_figure_skips_one_sided_groups(tmp_path, monkeypatch):
+    """A representation missing one learner is skipped, not crashed on."""
+    import brood.plotting.cv_comparison as plot_mod
+
+    rows = [
+        {"model": model, "fold": fold, "ap": 0.1 * i + 0.01 * fold}
+        for i, model in enumerate(
+            ["tabpfn_maccs", "rf_maccs", "tabpfn_rdkit2d"]
+        )
+        for fold in (0, 1, 2)
+    ]
+    out = tmp_path / "out"
+    plot_mod._plot_representation(pd.DataFrame(rows), "demo", out, "ap")
+    assert (out / "demo_cv_representation.svg").exists()
+
+
+def test_representation_figure_skipped_when_no_pairs_exist(tmp_path, caplog):
+    """No complete learner pair means no figure 2, without an exception."""
+    import brood.plotting.cv_comparison as plot_mod
+
+    rows = [
+        {"model": model, "fold": fold, "ap": 0.1 * i + 0.01 * fold}
+        for i, model in enumerate(["tabpfn_maccs", "rf_rdkit2d"])
+        for fold in (0, 1, 2)
+    ]
+    out = tmp_path / "out"
+    with caplog.at_level(
+        logging.WARNING, logger="brood.plotting.cv_comparison"
+    ):
+        plot_mod._plot_representation(pd.DataFrame(rows), "demo", out, "ap")
+    assert not out.exists()
+    assert "No learner x representation pairs" in caplog.text

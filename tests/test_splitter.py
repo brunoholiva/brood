@@ -11,7 +11,6 @@ from brood.data.splitter import (
     assign_cv_folds,
     scaffold_split,
     split_train_test,
-    split_train_valid_test,
     validate_cv_folds,
 )
 
@@ -227,15 +226,6 @@ class TestSplitTrainTest:
         train_df, test_df = split_train_test(diverse_df)
         assert set(train_df["scaffold"]).isdisjoint(test_df["scaffold"])
         assert len(train_df) + len(test_df) == len(diverse_df)
-
-    def test_split_train_valid_test_three_way(self, diverse_df):
-        """All three partitions are mutually scaffold-disjoint."""
-        train_df, valid_df, test_df = split_train_valid_test(diverse_df)
-        assert set(train_df["scaffold"]).isdisjoint(valid_df["scaffold"])
-        assert set(train_df["scaffold"]).isdisjoint(test_df["scaffold"])
-        assert set(valid_df["scaffold"]).isdisjoint(test_df["scaffold"])
-        total = len(train_df) + len(valid_df) + len(test_df)
-        assert total == len(diverse_df)
 
 
 class TestAssignCvFolds:
