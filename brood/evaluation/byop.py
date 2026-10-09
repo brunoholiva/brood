@@ -39,7 +39,29 @@ def load_predictions(
     smiles_col: str = "standardized_smiles",
     score_col: str = "predicted_probability",
 ) -> pd.DataFrame:
-    """Load a prediction CSV and validate required columns."""
+    """Load a prediction CSV and validate required columns.
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to the predictions CSV.
+    smiles_col : str
+        Column name containing SMILES identifiers.
+    score_col : str
+        Column name containing predicted scores.
+
+    Returns
+    -------
+    pd.DataFrame
+        The loaded predictions with validated columns and unique SMILES.
+
+    Raises
+    ------
+    KeyError
+        If a required column is missing.
+    ValueError
+        If the SMILES column contains duplicated values.
+    """
     preds = pd.read_csv(path)
     missing = [c for c in (smiles_col, score_col) if c not in preds.columns]
     if missing:
@@ -59,6 +81,27 @@ def merge_predictions(
     All columns from ``test_df`` are retained. Predictions not matching
     a test SMILES are silently dropped. Both sides must have unique SMILES,
     so the join stays one-to-one.
+
+    Parameters
+    ----------
+    test_df : pd.DataFrame
+        Test-set DataFrame with a ``standardized_smiles`` column.
+    preds_df : pd.DataFrame
+        Predictions DataFrame with SMILES and score columns.
+    smiles_col : str
+        SMILES column name in ``preds_df``.
+    score_col : str
+        Score column name in ``preds_df``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Inner-joined frame with test columns plus the prediction score.
+
+    Raises
+    ------
+    ValueError
+        If either input has duplicated SMILES values.
     """
     assert_unique_smiles(test_df, "standardized_smiles", "test set")
     assert_unique_smiles(preds_df, smiles_col, "predictions")
@@ -79,7 +122,24 @@ def evaluate_predictions(
     label_col: str = "target",
     distance_col: str = "distance_to_train",
 ) -> BroodResult:
-    """Evaluate predictions and return a BroodResult."""
+    """Evaluate predictions and return a BroodResult.
+
+    Parameters
+    ----------
+    merged_df : pd.DataFrame
+        Merged test + predictions DataFrame.
+    score_col : str
+        Column containing predicted probabilities.
+    label_col : str
+        Column containing true binary labels.
+    distance_col : str
+        Column containing distance-to-train values.
+
+    Returns
+    -------
+    BroodResult
+        Container with global and per-bin metrics plus the scored frame.
+    """
     return evaluate(
         merged_df,
         score_col=score_col,

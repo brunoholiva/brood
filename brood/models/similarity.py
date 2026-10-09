@@ -14,9 +14,8 @@ import pandas as pd
 from sklearn.metrics.pairwise import pairwise_distances
 from tqdm import tqdm
 
-from brood.core.artifacts import prediction_dir, run_dir, save_metadata
+from brood.core.artifacts import prediction_dir
 from brood.core.constants import PREDICTION_COL, SMILES_COL, TARGET_COL
-from brood.cv.loop import run_cv_model
 from brood.data.loader import load_split_data, save_predictions
 from brood.models.base import ModelBackend
 from brood.representations.morgan import MorganFingerprintTransformer
@@ -63,7 +62,7 @@ class SimilarityBackend(ModelBackend):
 
     def _require_actives(self, train_df: pd.DataFrame) -> pd.DataFrame:
         actives = train_df[train_df[TARGET_COL] == 1]
-        if len(actives) == 0:
+        if actives.empty:
             raise ValueError(
                 "No active molecules in training set — cannot score."
             )
@@ -83,7 +82,14 @@ class SimilarityBackend(ModelBackend):
             }
         )
 
-    def tune(self, *args, **kwargs) -> dict[str, Any]:
+    def tune(
+        self,
+        dataset: str,
+        data_dir: Path,
+        representation: str | None,
+        n_trials: int,
+        random_state: int,
+    ) -> dict[str, Any]:
         """Raise an error: the similarity baseline is not tunable."""
         raise RuntimeError("The similarity baseline is not tunable.")
 
@@ -96,23 +102,14 @@ class SimilarityBackend(ModelBackend):
     ) -> pd.DataFrame:
         """Score the held-out test set by max Tanimoto to training actives."""
         train_df, test_df = load_split_data(
-            data_dir / "splits" / f"{dataset}_train.csv",
-            data_dir / "splits" / f"{dataset}_test.csv",
+            data_dir / "splits" / dataset / "train.csv",
+            data_dir / "splits" / dataset / "test.csv",
             dataset,
             require_scaffold=False,
         )
         preds = self._predict(train_df, test_df)
         save_predictions(
             preds, prediction_dir(data_dir, dataset, self.name), "test.csv"
-        )
-        save_metadata(
-            run_dir(data_dir, dataset, self.name),
-            "metadata",
-            {
-                "model": self.name,
-                "fingerprint": "Morgan radius=2 fp_size=512",
-                "score": "maximum Tanimoto similarity to training actives",
-            },
         )
         return preds
 
@@ -127,13 +124,3 @@ class SimilarityBackend(ModelBackend):
     ) -> pd.DataFrame:
         """Score one CV fold by max Tanimoto to its training actives."""
         return self._predict(train_df, test_df)
-
-    def run_cv(
-        self, dataset: str, data_dir: Path, random_state: int
-    ) -> pd.DataFrame:
-        """Run scaffold CV for the similarity baseline."""
-
-        def _predict_fold(train_df, test_df):
-            return self._predict(train_df, test_df)
-
-        return run_cv_model(dataset, data_dir, self.name, _predict_fold)

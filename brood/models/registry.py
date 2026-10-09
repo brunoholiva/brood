@@ -7,6 +7,7 @@ lightgbm).
 
 from __future__ import annotations
 
+import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -24,11 +25,12 @@ class _LazyBackend:
 
     def _load(self):
         if self._cls is None:
-            module = __import__(self.module, fromlist=[self.class_name])
+            module = importlib.import_module(self.module)
             self._cls = getattr(module, self.class_name)
         return self._cls
 
     def build(self, **extra_kwargs) -> "ModelBackend":
+        """Instantiate the lazily-loaded backend."""
         cls = self._load()
         kwargs = {**self.kwargs, **extra_kwargs}
         return cls(**kwargs)
@@ -46,6 +48,9 @@ MODEL_REGISTRY: dict[str, _LazyBackend] = {
         "brood.models.sklearn", "SklearnBackend", {"name": "lgbm"}
     ),
     "tabpfn": _LazyBackend("brood.models.tabpfn", "TabPFNBackend", {}),
+    "tabpfn_regression": _LazyBackend(
+        "brood.models.tabpfn", "TabPFNRegressionBackend", {}
+    ),
     "chemprop": _LazyBackend("brood.models.chemprop", "ChempropBackend", {}),
     "similarity": _LazyBackend(
         "brood.models.similarity", "SimilarityBackend", {}

@@ -28,7 +28,7 @@ def _compute_by_bin(
     for low, high, name in bins:
         mask = (distances >= low) & (distances < high)
         subset = df[mask]
-        if len(subset) == 0:
+        if subset.empty:
             by_bin.append(
                 BinMetrics(
                     bin=name,
@@ -97,9 +97,7 @@ def evaluate(
         df, distance_col, label_col, score_col, bedroc_alpha, bins
     )
 
-    return BroodResult(
-        global_=global_, by_bin=by_bin, test_df=df, pipeline=None
-    )
+    return BroodResult(global_=global_, by_bin=by_bin, test_df=df)
 
 
 def _validate_columns(df, score_col, label_col, distance_col):

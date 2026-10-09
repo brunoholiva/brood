@@ -7,24 +7,26 @@ experiment.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from loguru import logger
 from rdkit import Chem, RDLogger
 from sklearn.metrics import average_precision_score
 from sklearn.model_selection import StratifiedGroupKFold
 
-from brood.core.artifacts import prediction_dir, run_dir, save_metadata
+from brood.core.artifacts import prediction_dir, run_dir
 from brood.core.constants import PREDICTION_COL, SMILES_COL, TARGET_COL
 from brood.data.loader import load_split_data, save_predictions
 from brood.data.splitter import split_train_test
 from brood.models.base import ModelBackend
 from brood.models.lightning import predict_lightning, train_lightning_model
 from brood.tuning.optuna import run_optuna_tuning
+
+logger = logging.getLogger(__name__)
 
 RDLogger.logger().setLevel(RDLogger.ERROR)
 
@@ -44,7 +46,7 @@ def _import_chemprop():
     from chemprop.models import MPNN, save_model
     from chemprop.nn.agg import NormAggregation
     from chemprop.nn.message_passing import BondMessagePassing
-    from chemprop.nn.metrics import ArrayLike, BinaryAUPRC, ChempropMetric
+    from chemprop.nn.metrics import BinaryAUPRC, ChempropMetric
     from chemprop.nn.predictors import BinaryClassificationFFN
 
     return {
@@ -55,17 +57,10 @@ def _import_chemprop():
         "save_model": save_model,
         "NormAggregation": NormAggregation,
         "BondMessagePassing": BondMessagePassing,
-        "ArrayLike": ArrayLike,
         "BinaryAUPRC": BinaryAUPRC,
         "ChempropMetric": ChempropMetric,
         "BinaryClassificationFFN": BinaryClassificationFFN,
     }
-
-
-def _import_torch():
-    import torch
-
-    return torch
 
 
 def _make_weighted_bce(pos_weight: float, task_weights: Any = 1.0):
@@ -78,7 +73,8 @@ def _make_weighted_bce(pos_weight: float, task_weights: Any = 1.0):
             self.pos_weight = pos_weight
 
         def _calc_unreduced_loss(self, preds, targets, *args):
-            torch = _import_torch()
+            import torch
+
             pw = torch.tensor(
                 [self.pos_weight], device=preds.device, dtype=preds.dtype
             )
@@ -112,7 +108,6 @@ def _build_model(pos_weight: float | None = None, **kwargs):
         undirected=True,
     )
     agg = cp["NormAggregation"]()
-    pos_weight = kwargs.get("pos_weight")
     criterion = (
         _make_weighted_bce(pos_weight) if pos_weight is not None else None
     )
@@ -170,10 +165,8 @@ class _Fold:
 
 def _build_folds(train_df: pd.DataFrame) -> list[_Fold]:
     cp = _import_chemprop()
-    all_smiles = train_df[SMILES_COL].tolist()
-    all_targets = train_df[TARGET_COL].tolist()
-    groups = np.array(train_df["scaffold"].tolist())
-    y = np.array(all_targets)
+    groups = train_df["scaffold"].to_numpy()
+    y = train_df[TARGET_COL].to_numpy()
 
     n_splits = max(
         2,
@@ -188,16 +181,18 @@ def _build_folds(train_df: pd.DataFrame) -> list[_Fold]:
     )
     folds = []
     for train_idx, val_idx in gkf.split(np.arange(len(train_df)), y, groups):
-        train_targets = [all_targets[i] for i in train_idx]
+        train_slice = train_df.iloc[train_idx]
+        val_slice = train_df.iloc[val_idx]
         train_dps = _make_datapoints(
-            [all_smiles[i] for i in train_idx], train_targets
+            train_slice[SMILES_COL].tolist(),
+            train_slice[TARGET_COL].tolist(),
         )
         val_dps = _make_datapoints(
-            [all_smiles[i] for i in val_idx],
-            [all_targets[i] for i in val_idx],
+            val_slice[SMILES_COL].tolist(),
+            val_slice[TARGET_COL].tolist(),
         )
-        n_pos = sum(train_targets)
-        n_neg = len(train_targets) - n_pos
+        n_pos = int(train_slice[TARGET_COL].sum())
+        n_neg = len(train_slice) - n_pos
         folds.append(
             _Fold(
                 train_loader=_make_loader(
@@ -321,12 +316,12 @@ def _train_and_predict(
         model_path = out_dir / "model.pt"
         cp["save_model"](str(model_path), model)
         if best_metric is not None:
-            logger.success(
+            logger.info(
                 f"Chemprop model saved to {model_path} "
                 f"(best val_loss={best_metric:.4f})"
             )
         else:
-            logger.success(f"Chemprop model saved to {model_path}")
+            logger.info(f"Chemprop model saved to {model_path}")
 
     return pd.DataFrame({SMILES_COL: test_smiles, PREDICTION_COL: probs})
 
@@ -342,16 +337,6 @@ class ChempropBackend(ModelBackend):
         """Return Chemprop architecture and training defaults."""
         return _default_params()
 
-    def _load_params(self, data_dir: Path, dataset: str) -> dict[str, Any]:
-        import json
-
-        path = run_dir(data_dir, dataset, self.name) / "params.json"
-        params = self.default_params()
-        if path.exists():
-            params.update(json.loads(path.read_text()))
-            logger.info(f"Using tuned params from {path}")
-        return params
-
     def tune(
         self,
         dataset: str,
@@ -362,8 +347,8 @@ class ChempropBackend(ModelBackend):
     ) -> dict[str, Any]:
         """Search Chemprop hyperparameters with inner scaffold CV."""
         train_df, _ = load_split_data(
-            data_dir / "splits" / f"{dataset}_train.csv",
-            data_dir / "splits" / f"{dataset}_test.csv",
+            data_dir / "splits" / dataset / "train.csv",
+            data_dir / "splits" / dataset / "test.csv",
             dataset,
             require_scaffold=True,
         )
@@ -386,8 +371,8 @@ class ChempropBackend(ModelBackend):
     ) -> pd.DataFrame:
         """Train Chemprop on the development set and predict the test set."""
         train_df, test_df = load_split_data(
-            data_dir / "splits" / f"{dataset}_train.csv",
-            data_dir / "splits" / f"{dataset}_test.csv",
+            data_dir / "splits" / dataset / "train.csv",
+            data_dir / "splits" / dataset / "test.csv",
             dataset,
             require_scaffold=True,
         )
@@ -402,11 +387,6 @@ class ChempropBackend(ModelBackend):
             preds,
             prediction_dir(data_dir, dataset, self.name),
             "test.csv",
-        )
-        save_metadata(
-            run_dir(data_dir, dataset, self.name),
-            "metadata",
-            {"model": self.name, "artifact": "model.pt", "params": params},
         )
         return preds
 

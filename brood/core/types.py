@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
-from sklearn.pipeline import Pipeline
 
 
 @dataclass
@@ -71,11 +69,8 @@ class BroodResult:
         Per-bin ranking metrics.
     test_df : pd.DataFrame
         Test set with predictions and distance_to_train.
-    pipeline : Pipeline or None
-        Trained pipeline. None if test set was empty.
     """
 
     global_: RankingMetrics
     by_bin: list[BinMetrics]
     test_df: pd.DataFrame
-    pipeline: Optional[Pipeline]

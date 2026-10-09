@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
-from loguru import logger
+
+logger = logging.getLogger(__name__)
 
 
 def _suppress_lightning_noise() -> None:
@@ -98,48 +101,42 @@ def train_lightning_model(
         ),
     ]
 
-    temp_ckpt_dir = None
-    if restore_best_weights:
-        temp_ckpt_dir = tempfile.mkdtemp()
-        callbacks.append(
-            pl.callbacks.ModelCheckpoint(
-                dirpath=str(temp_ckpt_dir),
-                monitor=monitor,
-                mode=monitor_mode,
-                save_top_k=1,
+    with tempfile.TemporaryDirectory() as temp_ckpt_dir:
+        if restore_best_weights:
+            callbacks.append(
+                pl.callbacks.ModelCheckpoint(
+                    dirpath=temp_ckpt_dir,
+                    monitor=monitor,
+                    mode=monitor_mode,
+                    save_top_k=1,
+                )
             )
+
+        trainer = pl.Trainer(
+            max_epochs=epochs,
+            accelerator=accelerator,
+            devices=1,
+            callbacks=callbacks,
+            enable_progress_bar=enable_progress_bar,
+            enable_model_summary=False,
+            logger=False,
+            enable_checkpointing=restore_best_weights,
         )
+        trainer.fit(model, train_loader, val_loader)
 
-    trainer = pl.Trainer(
-        max_epochs=epochs,
-        accelerator=accelerator,
-        devices=1,
-        callbacks=callbacks,
-        enable_progress_bar=enable_progress_bar,
-        enable_model_summary=False,
-        logger=False,
-        enable_checkpointing=restore_best_weights,
-    )
-    trainer.fit(model, train_loader, val_loader)
-
-    best_metric = None
-    if restore_best_weights:
-        checkpoint_callback = trainer.checkpoint_callback
-        if (
-            checkpoint_callback is not None
-            and checkpoint_callback.best_model_path
-        ):
-            best_path = checkpoint_callback.best_model_path
-            if hasattr(checkpoint_callback, "best_model_score"):
-                best_metric = float(checkpoint_callback.best_model_score)
-            logger.debug(f"Restoring best weights from: {best_path}")
-            ckpt = torch.load(best_path, weights_only=False)
-            model.load_state_dict(ckpt["state_dict"])
-
-        if temp_ckpt_dir is not None:
-            import shutil
-
-            shutil.rmtree(temp_ckpt_dir)
+        best_metric = None
+        if restore_best_weights:
+            checkpoint_callback = trainer.checkpoint_callback
+            if (
+                checkpoint_callback is not None
+                and checkpoint_callback.best_model_path
+            ):
+                best_path = checkpoint_callback.best_model_path
+                if hasattr(checkpoint_callback, "best_model_score"):
+                    best_metric = float(checkpoint_callback.best_model_score)
+                logger.debug(f"Restoring best weights from: {best_path}")
+                ckpt = torch.load(best_path, weights_only=False)
+                model.load_state_dict(ckpt["state_dict"])
 
     return trainer, best_metric
 

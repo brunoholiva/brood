@@ -8,6 +8,7 @@ shared outer 5-fold CV reuses those fixed parameters.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -15,7 +16,6 @@ from typing import Any, Callable
 import joblib
 import numpy as np
 import pandas as pd
-from loguru import logger
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
@@ -23,12 +23,19 @@ from sklearn.model_selection import StratifiedGroupKFold, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from brood.core.artifacts import run_dir, save_metadata
+from brood.core.artifacts import run_dir
 from brood.core.constants import PREDICTION_COL, SMILES_COL, TARGET_COL
 from brood.data.loader import load_split_data
 from brood.models.base import ModelBackend
-from brood.representations.cache import get_features, has_cached_features
+from brood.representations.cache import (
+    get_features,
+    get_train_features,
+    has_cached_features,
+    has_cached_train,
+)
 from brood.representations.registry import get_representation
+
+logger = logging.getLogger(__name__)
 
 #: Inner folds used by every Optuna trial.
 INNER_SPLITS = 5
@@ -157,7 +164,28 @@ def tune_learner(
     n_trials: int,
     random_state: int = 42,
 ) -> dict:
-    """Search ``learner``'s small space with inner scaffold CV on AP."""
+    """Search ``learner``'s small space with inner scaffold CV on AP.
+
+    Parameters
+    ----------
+    learner : Learner
+        Learner object with ``search_space`` and ``build`` methods.
+    x : np.ndarray
+        Feature matrix.
+    y : np.ndarray
+        Binary target vector.
+    groups : np.ndarray
+        Scaffold group labels for each row.
+    n_trials : int
+        Number of Optuna trials.
+    random_state : int
+        Random seed for fold shuffling and the Optuna sampler.
+
+    Returns
+    -------
+    dict
+        Best hyperparameters found by Optuna.
+    """
     import optuna
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -228,47 +256,38 @@ class SklearnBackend(ModelBackend):
         }
         return {k: v for k, v in defaults.items() if k.startswith(self.name)}
 
-    def _load_params(
-        self, data_dir: Path, dataset: str, representation: str | None
-    ) -> dict[str, Any]:
-        """Overlay saved tuned params on the defaults."""
-        name = self.run_name(representation)
-        path = run_dir(data_dir, dataset, name) / "params.json"
-        params = self.default_params()
-        if path.exists():
-            params.update(json.loads(path.read_text()))
-            logger.info(f"Using tuned params from {path}")
-        return params
-
-    def _load_features(
+    def _train_matrix(
         self,
         dataset: str,
         representation: str,
         data_dir: Path,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return cached (X_train, X_test) for one representation."""
-        cached = has_cached_features(data_dir, dataset, representation)
+    ) -> tuple[np.ndarray, pd.DataFrame]:
+        """Return train features and the raw train frame (test untouched)."""
+        train_df = pd.read_csv(data_dir / "splits" / dataset / "train.csv")
+        cached = has_cached_train(data_dir, dataset, representation)
         transformer = None if cached else get_representation(representation)
-        x_train, _, x_test, _, _ = get_features(
+        x_train, _, _ = get_train_features(
             dataset, representation, transformer, data_dir
         )
-        return x_train, x_test
+        return x_train, train_df
 
-    def _feature_matrix(
+    def _heldout_matrix(
         self,
         dataset: str,
         representation: str,
         data_dir: Path,
     ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame]:
-        """Return cached train/test features and raw split dataframes."""
+        """Return train/test features and raw split dataframes."""
         train_df, test_df = load_split_data(
-            data_dir / "splits" / f"{dataset}_train.csv",
-            data_dir / "splits" / f"{dataset}_test.csv",
+            data_dir / "splits" / dataset / "train.csv",
+            data_dir / "splits" / dataset / "test.csv",
             dataset,
             require_scaffold=False,
         )
-        x_train, x_test = self._load_features(
-            dataset, representation, data_dir
+        cached = has_cached_features(data_dir, dataset, representation)
+        transformer = None if cached else get_representation(representation)
+        x_train, _, x_test, _, _ = get_features(
+            dataset, representation, transformer, data_dir
         )
         return x_train, x_test, train_df, test_df
 
@@ -283,7 +302,7 @@ class SklearnBackend(ModelBackend):
         """Search hyperparameters with inner scaffold CV and save params."""
         if representation is None:
             raise ValueError(f"{self.name} requires a representation")
-        x_train, _, train_df, _ = self._feature_matrix(
+        x_train, train_df = self._train_matrix(
             dataset, representation, data_dir
         )
         groups = (
@@ -305,15 +324,13 @@ class SklearnBackend(ModelBackend):
         )
         params = {**self.default_params(), **tuned}
         params[f"{self.name}__random_state"] = random_state
-        if self.name == "logreg":
-            params["logreg__random_state"] = random_state
 
         out = run_dir(data_dir, dataset, self.run_name(representation))
         out.mkdir(parents=True, exist_ok=True)
         (out / "params.json").write_text(
             json.dumps(params, indent=2, sort_keys=True)
         )
-        logger.success(f"{self.run_name(representation)}: params saved")
+        logger.info(f"{self.run_name(representation)}: params saved")
         return params
 
     def predict_held_out(
@@ -326,7 +343,7 @@ class SklearnBackend(ModelBackend):
         """Fit on the full development set and predict the test set."""
         if representation is None:
             raise ValueError(f"{self.name} requires a representation")
-        x_train, x_test, train_df, test_df = self._feature_matrix(
+        x_train, x_test, train_df, test_df = self._heldout_matrix(
             dataset, representation, data_dir
         )
         name = self.run_name(representation)
@@ -338,15 +355,6 @@ class SklearnBackend(ModelBackend):
         out_dir = run_dir(data_dir, dataset, name)
         out_dir.mkdir(parents=True, exist_ok=True)
         joblib.dump(pipe, out_dir / "model.joblib")
-        save_metadata(
-            out_dir,
-            "metadata",
-            {
-                "model": name,
-                "params": params,
-                "representation": representation,
-            },
-        )
         return pd.DataFrame(
             {
                 SMILES_COL: test_df[SMILES_COL].to_numpy(),
@@ -366,9 +374,7 @@ class SklearnBackend(ModelBackend):
         """Fit on one CV fold's training slice and predict its test slice."""
         if representation is None:
             raise ValueError(f"{self.name} requires a representation")
-        x_train, _, train_full_df, _ = self._feature_matrix(
-            dataset, representation, data_dir
-        )
+        x_train, _ = self._train_matrix(dataset, representation, data_dir)
         pipe = self._learner.build(params)
         train_idx = train_df.index.to_numpy()
         test_idx = test_df.index.to_numpy()
@@ -380,14 +386,3 @@ class SklearnBackend(ModelBackend):
                 PREDICTION_COL: probabilities,
             }
         )
-
-
-def model_name(learner_name: str, representation: str) -> str:
-    """Run name for one learner x representation pair."""
-    return f"{learner_name}_{representation}"
-
-
-def default_params() -> dict[str, Any]:
-    """Pre-specified defaults used when no tuned params exist."""
-    backend = SklearnBackend("rf")
-    return backend.default_params()
