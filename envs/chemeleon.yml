@@ -1,0 +1,22 @@
+name: chemeleon
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11.15
+  - rdkit=2025.9.3
+  - numpy=2.4.4
+  - pandas=2.3.3
+  - scikit-learn=1.8.0
+  - scipy=1.17.1
+  - tqdm=4.67.3
+  - loguru=0.7.3
+  - optuna=4.8.0
+  - pip
+  - pip:
+    - chemprop==2.2.3
+    - torch==2.12.0
+    - lightning==2.6.4
+    - tabpfn==9.0.0
+    - "polaris-lib==0.13.0"
+    - "authlib<1.8"

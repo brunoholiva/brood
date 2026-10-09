@@ -1,0 +1,30 @@
+name: minimol
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11.17
+  - rdkit=2026.3.6
+  - numpy=1.26.4
+  - scipy=1.14.1
+  - pandas=3.0.6
+  - scikit-learn=1.9.1
+  - tqdm=4.70.1
+  - loguru=0.7.3
+  - pip
+  - pip:
+    # graphium needs torch-sparse/scatter/cluster wheels matching torch 2.5;
+    # scipy must stay <1.15 (graphium featurizes adjacency as float16);
+    # setuptools<81 keeps pkg_resources (graphium/minimol import it).
+    - --find-links=https://data.pyg.org/whl/torch-2.5.0+cu124.html
+    - torch==2.5.1
+    - torch-sparse==0.6.18+pt25cu124
+    - torch-scatter==2.1.2+pt25cu124
+    - torch-cluster==1.6.3+pt25cu124
+    - minimol==1.3.5
+    - tabpfn==9.0.0
+    - setuptools<81
+    - pytest==9.1.1
+    - optuna==5.0.0
+    - "polaris-lib==0.13.0"
+    - "authlib<1.8"
