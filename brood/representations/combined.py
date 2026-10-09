@@ -13,6 +13,8 @@ from rdkit.Chem import AllChem, MACCSkeys
 from sklearn.base import BaseEstimator, TransformerMixin
 from tqdm import tqdm
 
+from brood.representations._utils import require_mols
+
 N_RDKIT_DESCRIPTORS = 200
 N_MACCS = 167
 
@@ -44,8 +46,8 @@ class MoleculeFeaturizer(BaseEstimator, TransformerMixin):
         """Total number of output features."""
         return self.fp_size + N_RDKIT_DESCRIPTORS + N_MACCS
 
-    def fit(self, X, y=None):
-        """Stateless transformer; returns self."""
+    def fit(self, X=None, y=None):
+        """No-op: component featurizers are stateless."""
         return self
 
     def transform(self, X):
@@ -69,26 +71,17 @@ class MoleculeFeaturizer(BaseEstimator, TransformerMixin):
         )
         rdkit_gen = rdNormalizedDescriptors.RDKit2DNormalized()
 
+        mols = require_mols(X)
         vecs = []
-        for i, s in enumerate(
-            tqdm(X, desc="Featurize", unit="mol", leave=True)
-        ):
-            mol = Chem.MolFromSmiles(s)
-            if mol is None:
-                raise ValueError(f"Invalid SMILES at position {i}")
-
-            # Morgan
+        for mol in tqdm(mols, desc="Featurize", unit="mol", leave=True):
             morgan = np.array(generator.GetFingerprint(mol), dtype=np.float64)
-
-            # RDKit2D
-            rdkit2d = np.nan_to_num(rdkit_gen.process(s)[1:], nan=0.0)
-
-            # MACCS
+            rdkit2d = np.nan_to_num(
+                rdkit_gen.process(Chem.MolToSmiles(mol))[1:], nan=0.0
+            )
             maccs_arr = np.zeros((N_MACCS,))
             DataStructs.ConvertToNumpyArray(
                 MACCSkeys.GenMACCSKeys(mol), maccs_arr
             )
-
             vecs.append(np.concatenate((morgan, rdkit2d, maccs_arr)))
 
         return np.array(vecs, dtype=np.float64)

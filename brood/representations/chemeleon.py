@@ -70,8 +70,8 @@ class CheMeleonFingerprint(BaseEstimator, TransformerMixin):
             self._model.to(device=self.device)
         return self._model
 
-    def fit(self, X, y=None):
-        """No-op. Kept for sklearn Pipeline compatibility."""
+    def fit(self, X=None, y=None):
+        """No-op: model is loaded lazily during transform."""
         return self
 
     def transform(self, X: list[str | Mol]) -> np.ndarray:

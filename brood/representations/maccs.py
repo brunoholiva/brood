@@ -1,10 +1,12 @@
 """MACCS key fingerprint transformer."""
 
 import numpy as np
-from rdkit import Chem, DataStructs
+from rdkit import DataStructs
 from rdkit.Chem import MACCSkeys
 from sklearn.base import BaseEstimator, TransformerMixin
 from tqdm import tqdm
+
+from brood.representations._utils import require_mols
 
 
 class MACCSFingerprintTransformer(BaseEstimator, TransformerMixin):
@@ -13,26 +15,23 @@ class MACCSFingerprintTransformer(BaseEstimator, TransformerMixin):
     Stateless sklearn transformer for use in Pipeline.
     """
 
-    def fit(self, X, y=None):
-        """Stateless transformer; returns self."""
+    def fit(self, X=None, y=None):
+        """No-op: transformer is stateless."""
         return self
 
     def transform(self, X):
         """Convert SMILES to (n_samples, 167) int64 MACCS bit matrix."""
-        mols = [Chem.MolFromSmiles(s) for s in X]
-        _validate_mols(mols)
+        mols = require_mols(X)
         if not mols:
             return np.zeros((0, 167), dtype=np.int64)
-        vecs = []
-        for mol in tqdm(mols, desc="MACCS", unit="mol", leave=True):
+
+        def _maccs(mol):
             arr = np.zeros((167,))
             DataStructs.ConvertToNumpyArray(MACCSkeys.GenMACCSKeys(mol), arr)
-            vecs.append(arr)
+            return arr
+
+        vecs = [
+            _maccs(mol)
+            for mol in tqdm(mols, desc="MACCS", unit="mol", leave=True)
+        ]
         return np.array(vecs, dtype=np.int64)
-
-
-def _validate_mols(mols):
-    """Raise ValueError if any RDKit Mol parsed as None."""
-    for i, mol in enumerate(mols):
-        if mol is None:
-            raise ValueError(f"Invalid SMILES at position {i}")

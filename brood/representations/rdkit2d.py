@@ -14,8 +14,8 @@ class RDKit2DDescriptorTransformer(BaseEstimator, TransformerMixin):
     NaN values are replaced with 0.0.
     """
 
-    def fit(self, X, y=None):
-        """Stateless transformer; returns self."""
+    def fit(self, X=None, y=None):
+        """No-op: transformer is stateless."""
         return self
 
     def transform(self, X):

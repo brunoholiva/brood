@@ -5,7 +5,8 @@ import pytest
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 
-from src.fingerprints import MorganFingerprintTransformer, _validate_mols
+from brood.representations._utils import require_mols
+from brood.representations.morgan import MorganFingerprintTransformer
 
 SMILES = [
     "CCO",
@@ -35,10 +36,10 @@ class TestTransformer:
         assert t.fit(SMILES, y=None) is t
 
     def test_transform_shape(self):
-        """Transform returns (n, 2048) for default fp_size."""
+        """Transform returns (n, 512) for default fp_size."""
         t = MorganFingerprintTransformer()
         fps = t.transform(SMILES)
-        assert fps.shape == (len(SMILES), 2048)
+        assert fps.shape == (len(SMILES), 512)
 
     def test_transform_dtype_binary(self):
         """Transform returns binary int64 array."""
@@ -63,7 +64,7 @@ class TestTransformer:
         """Empty input returns empty array with correct shape."""
         t = MorganFingerprintTransformer()
         fps = t.transform([])
-        assert fps.shape == (0, 2048)
+        assert fps.shape == (0, 512)
 
     def test_deterministic(self):
         """Same input produces identical output."""
@@ -106,7 +107,7 @@ class TestPipeline:
         """Full workflow: splitter → pipeline predict."""
         import pandas as pd
 
-        from src.splitter import taylor_butina_split
+        from brood.data.splitter import scaffold_split
 
         df = pd.DataFrame(
             {
@@ -114,7 +115,7 @@ class TestPipeline:
                 "target": [0, 0, 0, 1, 1, 1, 0, 0, 1, 0],
             }
         )
-        train_df, test_df = taylor_butina_split(df)
+        train_df, test_df = scaffold_split(df)
 
         pipe = Pipeline(
             [
@@ -128,20 +129,15 @@ class TestPipeline:
         assert len(probs) == len(test_df)
 
 
-class TestValidateMols:
-    """_validate_mols helper function."""
+class TestRequireMols:
+    """require_mols helper function."""
 
     def test_all_valid(self):
-        """Valid mols raise no error."""
-        from rdkit import Chem
-
-        mols = [Chem.MolFromSmiles(s) for s in ["CCO", "CCN"]]
-        _validate_mols(mols)
+        """Valid SMILES return mols."""
+        mols = require_mols(["CCO", "CCN"])
+        assert len(mols) == 2
 
     def test_invalid_raises(self):
-        """None mol raises ValueError with index."""
-        from rdkit import Chem
-
-        mols = [Chem.MolFromSmiles("CCO"), None]
+        """Invalid SMILES raises ValueError with index."""
         with pytest.raises(ValueError, match="Invalid SMILES at position 1"):
-            _validate_mols(mols)
+            require_mols(["CCO", "not_a_molecule"])

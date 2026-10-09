@@ -1,16 +1,8 @@
-"""Minimol representation.
+"""Minimol representation as an sklearn transformer.
 
-from minimol import Minimol
-model = Minimol()
-smiles = [
-    'COc1ccc2cc(C(=O)NC3(C(=O)N[C@H](Cc4ccccc4)C(=O)NCC4CCN(CC5CCOCC5)CC4)CCCC3)sc2c1',
-    'Nc1nc(=O)c2c([nH]1)NCC(CNc1ccc(C(=O)NC(CCC(=O)O)C(=O)O)cc1)N2C=O',
-    'O=C1CCCN1CCCCN1CCN(c2cc(C(F)(F)F)ccn2)CC1',
-    'c1ccc(-c2cccnc2)cc1',
-]
-model(smiles)   # -> list of 4 tensors of (512,) shape
-This is the way Minimol is used to generate embeddings. Here, we adapted the
-code to be used as a sklearn transformer.
+Wraps the graphcore-research/minimol model so it produces 512-dim
+float32 embeddings for a list of SMILES strings. The underlying model is
+loaded lazily on the first ``transform`` call.
 """
 
 from __future__ import annotations
@@ -47,8 +39,8 @@ class MinimolFingerprint(BaseEstimator, TransformerMixin):
             self._model = Minimol(batch_size=self.batch_size)
         return self._model
 
-    def fit(self, X, y=None):
-        """No-op. Kept for sklearn Pipeline compatibility."""
+    def fit(self, X=None, y=None):
+        """No-op: model is loaded lazily during transform."""
         return self
 
     def transform(self, X: list[str]) -> np.ndarray:
