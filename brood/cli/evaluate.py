@@ -6,8 +6,8 @@ and saves a merged results CSV + a flat metrics CSV.
 
 Usage
 -----
-    python scripts/evaluate.py --dataset stokes
-        --test-full-path data/splits/stokes_test.csv
+    brood-evaluate --dataset stokes
+        --test-full-path data/splits/stokes/test.csv
         --runs rf=data/runs/stokes/rf/predictions/test.csv
                chemprop=data/runs/stokes/chemprop/predictions/test.csv
 """
@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
+from brood.core.logging import setup_logging
 from brood.evaluation.byop import (
     assert_unique_smiles,
     evaluate_predictions,
@@ -146,7 +147,7 @@ def _evaluate(
     for name, score_col_renamed in successful_runs:
         eval_df = merged.dropna(subset=[score_col_renamed]).copy()
 
-        if len(eval_df) == 0:
+        if eval_df.empty:
             logger.warning(
                 f"{name}: no test molecules with predictions, skipping"
             )
@@ -187,7 +188,7 @@ def _evaluate(
 
         metrics_rows.append(row)
 
-        logger.success(
+        logger.info(
             f"{name}  AP={row['global_ap']:.4f}  "
             f"BEDROC={row['global_bedroc']:.4f}  n={row['global_n']}"
         )
@@ -223,24 +224,25 @@ def _save_and_report(
         metrics_df.to_csv(output_dir / "metrics.csv", index=False)
         logger.info(f"Metrics saved to {output_dir / 'metrics.csv'}")
 
-        logger.info("─" * 65)
-        logger.info(
+        print("─" * 65)
+        print(
             f"{'model':<20} {'AP':<10} {'BEDROC':<10} {'BRIER':<10} {'n':<6}"
         )
-        logger.info("─" * 65)
+        print("─" * 65)
         for row in metrics_rows:
-            logger.info(
+            print(
                 f"{row['model']:<20} {row['global_ap']:<10.4f} "
                 f"{row['global_bedroc']:<10.4f} "
                 f"{row['global_brier']:<10.4f} {row['global_n']:<6}"
             )
-        logger.info("─" * 65)
+        print("─" * 65)
     else:
         logger.warning("No runs completed.")
 
 
 def main() -> None:
     """Evaluate multiple model predictions against the held-out test set."""
+    setup_logging()
     args = _parse_args()
     runs = _parse_runs(args.runs)
     if not runs:

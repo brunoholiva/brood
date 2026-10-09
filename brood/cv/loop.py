@@ -3,25 +3,27 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Callable
 
 import pandas as pd
-from loguru import logger
 
 from brood.core.artifacts import prediction_dir, run_dir
 from brood.evaluation.evaluator import _compute_ranking_metrics
+
+logger = logging.getLogger(__name__)
 
 
 def load_cv_folds(data_dir: Path, dataset: str) -> pd.DataFrame:
     """Load the fixed scaffold-CV folds for a dataset.
 
     Returns a frame with ``standardized_smiles``, ``target``, ``scaffold``,
-    and ``fold`` columns (written by ``scripts/split_datasets.py``). The
+    and ``fold`` columns (written by ``brood-split``). The
     row order matches the development-split CSV, so a cached feature matrix
     can be indexed with the fold frame's index.
     """
-    path = data_dir / "splits" / f"{dataset}_cv_folds.csv"
+    path = data_dir / "splits" / dataset / "cv_folds.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing CV folds CSV: {path}")
     return pd.read_csv(path)
@@ -41,8 +43,6 @@ def load_params(
     assumes.
     """
     path = run_dir(data_dir, dataset, model_name) / "params.json"
-    if not path.exists():
-        path = data_dir / "predictions" / dataset / f"{model_name}_params.json"
     if path.exists():
         with open(path) as f:
             saved = json.load(f)
@@ -71,6 +71,24 @@ def run_cv_model(
     Writes raw fold predictions to the model run directory and derived
     ``metrics/cv.csv`` with one metric row per fold. The held-out test set is
     never read here.
+
+    Parameters
+    ----------
+    dataset : str
+        Dataset name.
+    data_dir : Path
+        Root data directory containing ``splits/`` and ``runs/``.
+    model_name : str
+        Run name used for output paths.
+    predict_fn : Callable
+        Function taking train/test frames and returning predictions.
+    n_folds : int
+        Number of CV folds.
+
+    Returns
+    -------
+    pd.DataFrame
+        Concatenated CV predictions for all folds.
     """
     cv_folds = load_cv_folds(data_dir, dataset)
     rows = []
@@ -82,7 +100,7 @@ def run_cv_model(
     for fold in range(n_folds):
         train_df = cv_folds[cv_folds["fold"] != fold]
         test_df = cv_folds[cv_folds["fold"] == fold]
-        if len(train_df) == 0 or len(test_df) == 0:
+        if train_df.empty or test_df.empty:
             continue
 
         if train_df["target"].nunique() < 2 or test_df["target"].nunique() < 2:
@@ -136,5 +154,5 @@ def run_cv_model(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "cv.csv"
     out.to_csv(out_path, index=False)
-    logger.success(f"CV results for {model_name} saved to {out_path}")
+    logger.info(f"CV results for {model_name} saved to {out_path}")
     return out

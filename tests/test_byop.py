@@ -1,9 +1,14 @@
-"""Tests for the BYOP helpers in src/byop.py."""
+"""Tests for the BYOP helpers in brood.evaluation.byop."""
 
 import pandas as pd
 import pytest
 
-from src.byop import evaluate_predictions, load_predictions, merge_predictions
+from brood.evaluation.byop import (
+    assert_unique_smiles,
+    evaluate_predictions,
+    load_predictions,
+    merge_predictions,
+)
 
 SMILES = ["CCO", "CCN", "CCC", "CCCl", "CCBr"]
 
@@ -108,6 +113,46 @@ class TestMergePredictions:
             merge_predictions(bad, preds)
 
 
+class TestDuplicateSmiles:
+    """A repeated join key silently multiplies rows, so it must raise.
+
+    Without the guard a 20-row test frame joined on duplicated SMILES came
+    back as 36 rows, and every AP/BEDROC/Brier number and every figure was
+    computed over the inflated table with no error raised.
+    """
+
+    def test_repeated_test_smiles_raise(self, preds_csv):
+        duped = pd.DataFrame(
+            {
+                "standardized_smiles": ["CCO", "CCO", "CCC"],
+                "target": [0, 1, 1],
+                "distance_to_train": [0.3, 0.4, 0.5],
+            }
+        )
+        preds = load_predictions(preds_csv)
+        with pytest.raises(ValueError, match="repeated"):
+            merge_predictions(duped, preds)
+
+    def test_repeated_prediction_smiles_raise(self, test_df, tmp_path):
+        path = tmp_path / "dupes.csv"
+        pd.DataFrame(
+            {
+                "standardized_smiles": ["CCO", "CCO"],
+                "predicted_probability": [0.1, 0.9],
+            }
+        ).to_csv(path, index=False)
+        with pytest.raises(ValueError, match="repeated"):
+            load_predictions(path)
+
+    def test_guard_names_the_offending_column_and_counts(self):
+        frame = pd.DataFrame({"standardized_smiles": ["CCO", "CCO", "CCC"]})
+        with pytest.raises(ValueError, match="1 repeated.*3 rows, 2 unique"):
+            assert_unique_smiles(frame)
+
+    def test_unique_frame_passes(self, test_df):
+        assert_unique_smiles(test_df)
+
+
 class TestEvaluatePredictions:
     """Verify evaluate_predictions returns correct types."""
 
@@ -120,7 +165,6 @@ class TestEvaluatePredictions:
         assert 0.0 <= result.global_.average_precision <= 1.0
         assert len(result.by_bin) == 3
         assert result.test_df is merged
-        assert result.pipeline is None
 
     def test_global_metrics_present(self, test_df, preds_csv):
         preds = load_predictions(preds_csv)
@@ -129,6 +173,7 @@ class TestEvaluatePredictions:
         g = result.global_
         assert hasattr(g, "average_precision")
         assert hasattr(g, "bedroc")
+        assert hasattr(g, "brier")
         assert hasattr(g, "n")
 
     def test_bins_have_actives(self, test_df, preds_csv):
