@@ -1,0 +1,60 @@
+# Development-set model screening.
+#
+# Every entry is CV-only: no command launched by this file reads the held-out
+# test labels. Trainable runs tune first (10 trials on an inner 5-fold scaffold
+# CV), then run the shared fixed 5-fold CV.
+
+defaults:
+  n_trials: 10
+
+# Figure 1: the screening leaderboard, one row per model family.
+plot_models:
+  - similarity
+  - logreg_morgan2048
+  - rf_morgan2048
+  - lgbm_morgan2048
+  - tabpfn_morgan2048
+  - chemprop
+
+# No representation comparison in the screening stage.
+representation_plot_models: null
+
+# Pinned: null would glob every cv_folds.csv under data/splits/, including
+datasets:
+  - GNEtolC
+  - staph_aureus
+
+models:
+  similarity:
+    env: brood
+    cv_only: true
+  logreg_morgan2048:
+    env: brood
+    model: logreg
+    representation: morgan2048
+    tune: true
+    cv_only: true
+  rf_morgan2048:
+    env: brood
+    model: rf
+    representation: morgan2048
+    tune: true
+    cv_only: true
+  lgbm_morgan2048:
+    env: brood
+    model: lgbm
+    representation: morgan2048
+    tune: true
+    cv_only: true
+  tabpfn_morgan2048:
+    env: tabpfn
+    model: tabpfn
+    representation: morgan2048
+    gpu: 0
+    cv_only: true
+  chemprop:
+    env: chemprop
+    model: chemprop
+    tune: true
+    gpu: 0
+    cv_only: true

@@ -1,0 +1,27 @@
+# Official Polaris ADMET benchmarks.
+# Benchmark IDs are tdcommons/<dataset>. Train/test splits and metrics are
+# owned by Polaris and must not be recreated locally.
+
+datasets:
+  caco2_wang: {task: regression, metric: mean_absolute_error}
+  hia_hou: {task: classification, metric: roc_auc}
+  pgp_broccatelli: {task: classification, metric: roc_auc}
+  bioavailability_ma: {task: classification, metric: roc_auc}
+  lipophilicity_astrazeneca: {task: regression, metric: mean_absolute_error}
+  solubility_aqsoldb: {task: regression, metric: mean_absolute_error}
+  bbb_martins: {task: classification, metric: roc_auc}
+  ppbr_az: {task: regression, metric: mean_absolute_error}
+  vdss_lombardo: {task: regression, metric: spearmanr}
+  cyp2d6_veith: {task: classification, metric: pr_auc}
+  cyp3a4_veith: {task: classification, metric: pr_auc}
+  cyp2c9_veith: {task: classification, metric: pr_auc}
+  cyp2d6_substrate_carbonmangels: {task: classification, metric: pr_auc}
+  cyp3a4_substrate_carbonmangels: {task: classification, metric: roc_auc}
+  cyp2c9_substrate_carbonmangels: {task: classification, metric: pr_auc}
+  half_life_obach: {task: regression, metric: spearmanr}
+  clearance_microsome_az: {task: regression, metric: spearmanr}
+  clearance_hepatocyte_az: {task: regression, metric: spearmanr}
+  herg: {task: classification, metric: roc_auc}
+  ames: {task: classification, metric: roc_auc}
+  dili: {task: classification, metric: roc_auc}
+  ld50_zhu: {task: regression, metric: mean_absolute_error}

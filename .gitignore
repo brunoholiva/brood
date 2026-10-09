@@ -5,5 +5,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 data/
+figures/
 *.db
-mlruns/
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,28 @@
+# Held-out test evaluation.
+#
+# The only stage that reads data/splits/<dataset>/test.csv. Run it once, after
+# the screening and representation stages have frozen the model choice.
+
+plot_models: null
+representation_plot_models: null
+
+heldout_models:
+  - tabpfn_chemeleon
+  - tabpfn_minimol
+
+# Pinned: null would glob every test.csv under data/splits/, including
+datasets:
+  - GNEtolC
+  - staph_aureus
+
+models:
+  tabpfn_chemeleon:
+    env: chemeleon
+    model: tabpfn
+    representation: chemeleon
+    gpu: 0
+  tabpfn_minimol:
+    env: minimol
+    model: tabpfn
+    representation: minimol
+    gpu: 0
