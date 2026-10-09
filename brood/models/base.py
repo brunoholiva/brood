@@ -1,7 +1,7 @@
 """Model backend interface for brood.
 
 A model backend knows how to tune, predict on held-out data, and predict one
-CV fold for one model family. The unified ``scripts/train.py`` driver looks up
+CV fold for one model family. The unified ``brood-train`` driver looks up
 backends by name in :mod:`brood.models.registry`.
 """
 
@@ -45,7 +45,23 @@ class ModelBackend(ABC):
     ) -> dict[str, Any]:
         """Search hyperparameters and write params.json.
 
-        Returns the best parameters.
+        Parameters
+        ----------
+        dataset : str
+            Dataset name.
+        data_dir : Path
+            Root data directory.
+        representation : str | None
+            Representation name, or None for SMILES-based models.
+        n_trials : int
+            Number of Optuna trials.
+        random_state : int
+            Random seed for the sampler.
+
+        Returns
+        -------
+        dict[str, Any]
+            Best hyperparameters.
         """
 
     @abstractmethod
@@ -58,8 +74,21 @@ class ModelBackend(ABC):
     ) -> pd.DataFrame:
         """Fit on the full development set and predict the held-out test set.
 
-        Returns a dataframe with ``standardized_smiles`` and
-        ``predicted_probability``.
+        Parameters
+        ----------
+        dataset : str
+            Dataset name.
+        data_dir : Path
+            Root data directory.
+        representation : str | None
+            Representation name, or None for SMILES-based models.
+        params : dict[str, Any]
+            Hyperparameters/arguments for the model.
+
+        Returns
+        -------
+        pd.DataFrame
+            Frame with ``standardized_smiles`` and ``predicted_probability``.
         """
 
     @abstractmethod
@@ -74,8 +103,25 @@ class ModelBackend(ABC):
     ) -> pd.DataFrame:
         """Fit on ``train_df`` and predict ``test_df`` for one CV fold.
 
-        Returns a dataframe with ``standardized_smiles`` and
-        ``predicted_probability``.
+        Parameters
+        ----------
+        dataset : str
+            Dataset name.
+        data_dir : Path
+            Root data directory.
+        train_df : pd.DataFrame
+            Training slice for this fold.
+        test_df : pd.DataFrame
+            Test slice for this fold.
+        representation : str | None
+            Representation name, or None for SMILES-based models.
+        params : dict[str, Any]
+            Hyperparameters/arguments for the model.
+
+        Returns
+        -------
+        pd.DataFrame
+            Frame with ``standardized_smiles`` and ``predicted_probability``.
         """
 
     def run_name(self, representation: str | None) -> str:

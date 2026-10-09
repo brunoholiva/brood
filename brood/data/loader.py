@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-import sys
+import logging
 from pathlib import Path
 
 import pandas as pd
-from loguru import logger
+
+logger = logging.getLogger(__name__)
+
+
+class MissingScaffoldColumnError(ValueError):
+    """Raised when a split file lacks the required scaffold column."""
+
+
+class MissingSplitFileError(FileNotFoundError):
+    """Raised when a train or test split file is missing."""
 
 
 def load_split_data(
@@ -32,13 +41,20 @@ def load_split_data(
     -------
     tuple[pd.DataFrame, pd.DataFrame]
         (train_df, test_df) with loaded data.
+
+    Raises
+    ------
+    MissingSplitFileError
+        If either split file does not exist.
+    MissingScaffoldColumnError
+        If ``require_scaffold`` is True and the train file lacks a
+        ``scaffold`` column.
     """
     for p, label in [(train_path, "train"), (test_path, "test")]:
         if not p.exists():
-            logger.error(
-                f"{label} path not found: {p}. Run split_datasets.py first."
+            raise MissingSplitFileError(
+                f"{label} path not found: {p}. Run `brood-split` first."
             )
-            sys.exit(1)
 
     train_df = pd.read_csv(train_path)
     test_df = pd.read_csv(test_path)
@@ -54,11 +70,10 @@ def load_split_data(
         )
     else:
         if require_scaffold:
-            logger.error(
+            raise MissingScaffoldColumnError(
                 f"{train_path} missing 'scaffold' column. Re-run "
-                "scripts/split_datasets.py to regenerate splits."
+                "`brood-split` to regenerate splits."
             )
-            sys.exit(1)
         logger.debug(
             f"{dataset}: train={len(train_df)} ({n_train_actives} actives)"
         )
@@ -75,5 +90,5 @@ def save_predictions(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / filename
     preds.to_csv(out_path, index=False)
-    logger.success(f"Predictions saved to {out_path}")
+    logger.info(f"Predictions saved to {out_path}")
     return out_path

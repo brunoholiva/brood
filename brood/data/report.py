@@ -15,6 +15,30 @@ def normalize_dataset(
 
     Invalid molecules are excluded from the returned frame and counted in the
     report. Canonical SMILES with conflicting labels are removed entirely.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input frame with SMILES and target columns.
+    smiles_col : str
+        Name of the SMILES column.
+    target_col : str
+        Name of the target column.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, dict]
+        Normalized frame (``standardized_smiles``, ``target``) and a quality
+        report with keys ``input_rows``, ``missing_smiles``, ``invalid_smiles``,
+        ``conflicting_labels``, ``duplicate_rows``, ``molecules``, ``actives``,
+        and ``inactive``.
+
+    Raises
+    ------
+    KeyError
+        If ``smiles_col`` or ``target_col`` is missing from ``df``.
+    ValueError
+        If the target column contains non-binary values.
     """
     for column in (smiles_col, target_col):
         if column not in df.columns:

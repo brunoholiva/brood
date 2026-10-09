@@ -13,11 +13,11 @@ Two figures over the merged prediction table produced by
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
-from loguru import logger
 from sklearn.metrics import average_precision_score, precision_recall_curve
 
 from brood.plotting.style import (
@@ -26,6 +26,8 @@ from brood.plotting.style import (
     set_axes,
     use_style,
 )
+
+logger = logging.getLogger(__name__)
 
 # Must precede every ``plt.subplots()`` call: seaborn's set_style only reaches
 # axes created after it runs.
@@ -63,6 +65,29 @@ def plot_pr_curves(
     ``score_cols`` maps run name to its score column in ``merged``. Runs with
     no scored actives are skipped with a warning rather than raising: one run
     that predicted nothing usable should not hide the others.
+
+    Parameters
+    ----------
+    merged : pd.DataFrame
+        Merged test + predictions frame.
+    score_cols : dict[str, str]
+        Mapping from run name to score column name.
+    dataset : str
+        Dataset name for the title and filename.
+    output_dir : Path
+        Directory to write the SVG.
+    label_col : str
+        Column with true binary labels.
+
+    Returns
+    -------
+    Path
+        Path to the saved SVG.
+
+    Raises
+    ------
+    ValueError
+        If no run has both scores and actives.
     """
     fig, ax = plt.subplots(figsize=(7.2, 5.4), constrained_layout=True)
 
@@ -117,7 +142,7 @@ def plot_pr_curves(
 
     path = Path(output_dir) / f"{dataset}_heldout_pr.svg"
     save_fig(fig, path)
-    logger.success(f"PR curves saved to {path}")
+    logger.info(f"PR curves saved to {path}")
     return path
 
 
@@ -134,6 +159,26 @@ def plot_distance_vs_probability(
     Actives are drawn in colour and inactives in grey, so the eye picks out
     where the confident actives actually sit. Inactives are drawn first so the
     actives land on top of the grey cloud.
+
+    Parameters
+    ----------
+    merged : pd.DataFrame
+        Merged test + predictions frame.
+    run : str
+        Run name for the title and filename.
+    score_col : str
+        Column with predicted probabilities.
+    output_dir : Path
+        Directory to write the SVG.
+    label_col : str
+        Column with true binary labels.
+    distance_col : str
+        Column with distance-to-train values.
+
+    Returns
+    -------
+    Path
+        Path to the saved SVG.
     """
     frame = merged[[distance_col, score_col, label_col]].dropna()
     if frame.empty:

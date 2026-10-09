@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
 import optuna
-from loguru import logger
+
+logger = logging.getLogger(__name__)
 
 
 def run_optuna_tuning(
@@ -32,8 +34,9 @@ def run_optuna_tuning(
     random_state : int
         Random seed for TPESampler.
     params_path : Path | None
-        If provided, saves the best parameters as
-        ``<model_name>_params.json`` under this directory.
+        If provided, saves the best parameters. When it ends in ``.json``
+        the file is used verbatim; otherwise the file
+        ``<model_name>_params.json`` is written under this directory.
 
     Returns
     -------
@@ -51,7 +54,7 @@ def run_optuna_tuning(
     best_params = study.best_params
     best_cv_ap = study.best_value
 
-    logger.success(f"Tuning complete: best CV AP = {best_cv_ap:.4f}")
+    logger.info(f"Tuning complete: best CV AP = {best_cv_ap:.4f}")
     param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
     logger.info(f"{dataset} | Best params: {param_str}")
 
@@ -66,6 +69,6 @@ def run_optuna_tuning(
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(best_params, f, indent=2, sort_keys=True)
-        logger.success(f"Best params saved to {out_path}")
+        logger.info(f"Best params saved to {out_path}")
 
     return best_params

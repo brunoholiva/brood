@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Batch split all datasets in ``data/raw/`` into train/test.
 
-Writes ``data/splits/<dataset>_train.csv`` and
-``data/splits/<dataset>_test.csv`` for every CSV in the raw data
-directory.
+Writes ``data/splits/<dataset>/{train,test,cv_folds}.csv`` plus a
+manifest for every CSV in the raw data directory.
 
 Usage
 -----
-    python scripts/split_datasets.py
+    brood-split
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ from rdkit import RDLogger
 
 RDLogger.logger().setLevel(RDLogger.CRITICAL)
 
+from brood.core.logging import setup_logging
 from brood.data.report import normalize_dataset
 from brood.data.splitter import (
     assign_cv_folds,
@@ -54,14 +54,6 @@ def _find_column(df: pd.DataFrame, aliases: list[str]) -> str | None:
     return None
 
 
-def _dataset_name(path: Path) -> str:
-    name = path.stem
-    for suffix in ("_cleaned", "_processed", "_raw"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-    return name
-
-
 def _split_csv(
     path: Path,
     smiles_col: str | None,
@@ -69,7 +61,7 @@ def _split_csv(
     splits_dir: Path,
 ) -> None:
     df = pd.read_csv(path)
-    dataset = _dataset_name(path)
+    dataset = path.stem
 
     if smiles_col is None:
         smiles_col = _find_column(df, SMILES_ALIASES)
@@ -98,30 +90,23 @@ def _split_csv(
         logger.error(f"{dataset}: split failed — {e}")
         return
 
-    splits_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = splits_dir / dataset
+    out_dir.mkdir(parents=True, exist_ok=True)
     split_checks = validate_partitions(train_df, test_df)
 
-    train_df.to_csv(splits_dir / f"{dataset}_train.csv", index=False)
-    test_df.to_csv(splits_dir / f"{dataset}_test.csv", index=False)
+    train_df.to_csv(out_dir / "train.csv", index=False)
+    test_df.to_csv(out_dir / "test.csv", index=False)
 
     cv_df = assign_cv_folds(train_df, n_splits=CV_FOLDS)
-    cv_path = splits_dir / f"{dataset}_cv_folds.csv"
+    cv_path = out_dir / "cv_folds.csv"
     cv_df[["standardized_smiles", "target", "scaffold", "fold"]].to_csv(
         cv_path, index=False
     )
     cv_checks = validate_cv_folds(cv_df)
     actual_folds = cv_checks["folds"]
-    logger.success(f"CV folds ({actual_folds}) saved to {cv_path}")
+    logger.info(f"CV folds ({actual_folds}) saved to {cv_path}")
 
-    manifest = train_df.assign(partition="train").merge(
-        cv_df[["standardized_smiles", "fold"]],
-        on="standardized_smiles",
-        how="left",
-    )
-    test_manifest = test_df.assign(partition="test", fold=pd.NA)
-    manifest = pd.concat([manifest, test_manifest], ignore_index=True)
-    manifest.to_csv(splits_dir / f"{dataset}_manifest.csv", index=False)
-    (splits_dir / f"{dataset}_manifest.json").write_text(
+    (out_dir / "manifest.json").write_text(
         json.dumps(
             {
                 "dataset": dataset,
@@ -129,8 +114,8 @@ def _split_csv(
                 "cv_folds": actual_folds,
                 "random_state": 42,
                 "distance": "mean 5-nearest Morgan-Tanimoto distance",
-                "molecules": len(manifest),
-                "test_molecules": int((manifest["partition"] == "test").sum()),
+                "molecules": len(train_df) + len(test_df),
+                "test_molecules": len(test_df),
                 "split_checks": split_checks,
                 "cv_checks": cv_checks,
             },
@@ -138,17 +123,7 @@ def _split_csv(
         )
     )
 
-    _log_split_stats(dataset, train_df, test_df, cv_df)
-
-    n_train = len(train_df)
-    n_test = len(test_df)
-    n_train_actives = int(train_df["target"].sum())
-    n_test_actives = int(test_df["target"].sum())
-
-    logger.success(
-        f"{dataset}: train={n_train} ({n_train_actives} actives), "
-        f"test={n_test} ({n_test_actives} actives)"
-    )
+    _log_split_stats(dataset, train_df, test_df, cv_df, cv_checks)
 
 
 def _log_split_stats(
@@ -156,11 +131,12 @@ def _log_split_stats(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     cv_df: pd.DataFrame,
+    cv_checks: dict,
 ) -> None:
     """Log sanity statistics about a completed split."""
     n_scaff_overlap = len(set(train_df["scaffold"]) & set(test_df["scaffold"]))
     dist = test_df["distance_to_train"]
-    logger.success(
+    logger.info(
         f"{dataset}: train={len(train_df)} "
         f"({train_df['target'].mean():.1%} actives, "
         f"{train_df['scaffold'].nunique()} scaffolds) | "
@@ -172,7 +148,6 @@ def _log_split_stats(
         f"{dataset}: test distance_to_train — "
         f"min={dist.min():.3f} mean={dist.mean():.3f} max={dist.max():.3f}"
     )
-    cv_checks = validate_cv_folds(cv_df)
     fold_stats = [
         f"fold{fold}: {len(fdf)} ({fdf['target'].mean():.1%} actives, "
         f"{fdf['scaffold'].nunique()} scaffolds)"
@@ -212,6 +187,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """Run batch split on all CSVs in data/."""
+    setup_logging()
     args = _parse_args()
     data_dir = Path(args.data_dir)
     splits_dir = Path(args.splits_dir)
@@ -221,7 +197,7 @@ def main() -> None:
         logger.warning(f"No CSVs found in {data_dir}/")
         return
 
-    logger.info(f"Splitting {len(csvs)} dataset(s)...")
+    logger.info(f"Splitting {len(csvs)} dataset(s)")
     for path in csvs:
         _split_csv(path, args.smiles_col, args.target_col, splits_dir)
 

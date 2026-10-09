@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Cross-validation figures for average precision.
 
-Reads raw fold predictions from ``data/runs/<dataset>/*/predictions/cv.csv``
-and renders two figures:
+Reads per-fold metrics from ``data/runs/<dataset>/*/metrics/cv.csv`` and
+renders three figures:
 
 1. ``<dataset>_cv_ap.svg`` - every model's average precision, one faint dot
    per CV fold, coloured by learner family, against the max-similarity
@@ -18,9 +18,9 @@ and renders two figures:
    Tukey half-width are its own.
 
 Screening passes ``--skip-representation`` and gets figure 1 alone; the
-    representation stage passes ``--skip-leaderboard`` and gets figures 2 and 3
-    alone. Each stage must name only the figure it owns, otherwise it
-    overwrites the other stage's figure with the wrong model set.
+representation stage passes ``--skip-leaderboard`` and gets figures 2 and 3
+alone. Each stage must name only the figure it owns, otherwise it overwrites
+the other stage's figure with the wrong model set.
 
 Folds are treated as blocks, so the Tukey HSD intervals on figure 1 use the
 paired model-by-fold error term.
@@ -30,13 +30,14 @@ appended automatically, so pass ``figures``, not ``figures/<dataset>/cv``.
 
 Usage
 -----
-    python scripts/plot_cv_comparison.py --dataset stokes
-    python scripts/plot_cv_comparison.py --dataset stokes --output-dir figures
+    brood-plot-cv --dataset stokes
+    brood-plot-cv --dataset stokes --output-dir figures
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 import matplotlib
@@ -45,12 +46,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from loguru import logger
 from matplotlib.lines import Line2D
 from scipy import stats
 from statsmodels.stats.libqsturng import qsturng
 
-from brood.evaluation.evaluator import _compute_ranking_metrics
+from brood.core.logging import setup_logging
 from brood.plotting.style import (
     LEARNER_COLORS,
     LEARNER_LABELS,
@@ -60,6 +60,8 @@ from brood.plotting.style import (
     use_style,
 )
 from brood.representations import REPRESENTATION_REGISTRY
+
+logger = logging.getLogger(__name__)
 
 # Must precede every ``plt.subplots()`` call: seaborn's set_style only reaches
 # axes created after it runs.
@@ -79,6 +81,9 @@ _FACTORIAL_LEARNERS = ("tabpfn", "rf")
 #: Runs without a representation variant, drawn as reference lines in fig. 2.
 _REFERENCE_LEARNERS = ("chemprop", "similarity")
 
+#: Significance level for the blocked Tukey HSD intervals.
+_ALPHA = 0.05
+
 
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
@@ -91,12 +96,6 @@ def _parse_args() -> argparse.Namespace:
         "--output-dir",
         default=None,
         help="Output directory for the SVGs (default: figures/<dataset>/cv)",
-    )
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=0.05,
-        help="Tukey HSD significance level (default: 0.05)",
     )
     parser.add_argument(
         "--models",
@@ -117,57 +116,24 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_cv_ap(
+def _load_cv_metrics(
     data_dir: Path, dataset: str, models: list[str] | None = None
 ) -> pd.DataFrame:
-    """Load raw fold predictions and derive all comparison metrics."""
-    files = sorted((data_dir / "runs" / dataset).glob("*/predictions/cv.csv"))
-    selected = set(models) if models is not None else None
-    if selected is not None:
-        files = [path for path in files if path.parent.parent.name in selected]
-    raw_rows = []
-    raw_models = set()
-    if files:
-        for path in files:
-            model = path.parent.parent.name
-            raw_models.add(model)
-            predictions = pd.read_csv(path)
-            for fold, fold_df in predictions.groupby("fold"):
-                metrics = _compute_ranking_metrics(
-                    fold_df["target"].to_numpy(),
-                    fold_df["predicted_probability"].to_numpy(),
-                    20.0,
-                )
-                raw_rows.append(
-                    {
-                        "model": model,
-                        "fold": fold,
-                        "ap": metrics.average_precision,
-                        "bedroc": metrics.bedroc,
-                        "brier": metrics.brier,
-                    }
-                )
-    metric_files = sorted(
-        (data_dir / "runs" / dataset).glob("*/metrics/cv.csv")
-    )
-    metric_frames = [
-        pd.read_csv(path)
-        for path in metric_files
-        if path.parent.parent.name not in raw_models
-        and (selected is None or path.parent.parent.name in selected)
-    ]
-    if raw_rows or metric_frames:
-        frames = [pd.DataFrame(raw_rows), *metric_frames]
-        return pd.concat(frames, ignore_index=True)
+    """Load per-fold CV metrics from each run's ``metrics/cv.csv``.
 
-    cv_dir = data_dir / "cv" / dataset
-    files = sorted(cv_dir.glob("*.csv"))
+    These are the values :func:`brood.cv.loop.run_cv_model` already derived
+    from the raw fold predictions, so the figures read one source instead of
+    recomputing AP/BEDROC/Brier a second time.
+    """
+    files = sorted((data_dir / "runs" / dataset).glob("*/metrics/cv.csv"))
+    if models is not None:
+        selected = set(models)
+        files = [p for p in files if p.parent.parent.name in selected]
     if not files:
-        raise FileNotFoundError(f"No CV result CSVs found in {cv_dir}")
-    frame = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    if selected is not None and "model" in frame:
-        frame = frame[frame["model"].isin(selected)]
-    return frame
+        raise FileNotFoundError(
+            f"No CV metrics CSVs found under {data_dir / 'runs' / dataset}"
+        )
+    return pd.concat([pd.read_csv(path) for path in files], ignore_index=True)
 
 
 def _split_model(name: str) -> tuple[str, str]:
@@ -223,7 +189,7 @@ def _warn_on_incomplete_folds(df: pd.DataFrame, table: pd.DataFrame) -> None:
 
 
 def _blocked_test(
-    table: pd.DataFrame, alpha: float
+    table: pd.DataFrame, alpha: float = _ALPHA
 ) -> tuple[pd.Series, float, float]:
     """Blocked means, simultaneous Tukey half-width, and omnibus p-value.
 
@@ -256,13 +222,6 @@ def _blocked_test(
     return model_means, float(half_width), omnibus_p
 
 
-def _paired_tukey_summary(
-    df: pd.DataFrame, metric: str, alpha: float
-) -> tuple[pd.Series, float, float]:
-    """Blocked Tukey summary over every model in ``df``."""
-    return _blocked_test(_fold_table(df, metric), alpha)
-
-
 def _model_color(model: str) -> tuple:
     """Colourblind-safe colour for a run's learner family."""
     return LEARNER_COLORS.get(_split_model(model)[0], "#999999")
@@ -273,7 +232,6 @@ def _plot_leaderboard(
     dataset: str,
     output_dir: Path,
     metric: str,
-    alpha: float,
     suffix: str | None = None,
 ) -> None:
     """Figures 1 and 3: mean metric per run with one dot per CV fold.
@@ -283,10 +241,8 @@ def _plot_leaderboard(
     are not significantly worse than it.
     """
     metric_df = df.dropna(subset=[metric])
-    raw_means, half_width, omnibus_p = _paired_tukey_summary(
-        metric_df, metric, alpha
-    )
     table = _fold_table(metric_df, metric)
+    raw_means, half_width, omnibus_p = _blocked_test(table)
     _warn_on_incomplete_folds(df, table)
     means = raw_means.sort_values(ascending=False)
 
@@ -389,12 +345,12 @@ def _plot_leaderboard(
     ax.set_title(
         f"{dataset}: development-set 5-fold cross-validation "
         f"average precision{scope}\n"
-        f"omnibus F-test on blocked means, p={omnibus_p:.2g}, α={alpha}",
+        f"omnibus F-test on blocked means, p={omnibus_p:.2g}, α={_ALPHA}",
         fontsize=12,
     )
     path = output_dir / f"{dataset}_cv_{suffix or metric}.svg"
     save_fig(fig, path)
-    logger.success(f"{metric.upper()} leaderboard saved to {path}")
+    logger.info(f"{metric.upper()} leaderboard saved to {path}")
 
 
 def _plot_representation(
@@ -402,7 +358,6 @@ def _plot_representation(
     dataset: str,
     output_dir: Path,
     metric: str,
-    alpha: float,
 ) -> None:
     """Figure 2: metric per representation, paired within each group.
 
@@ -439,7 +394,7 @@ def _plot_representation(
 
     for x, rep in zip(xs, reps):
         left, right = pairs[rep]
-        _, half_width, _ = _blocked_test(table[[left, right]], alpha)
+        _, half_width, _ = _blocked_test(table[[left, right]])
         lo, hi = float(means[left]), float(means[right])
         color = LEARNER_COLORS[_split_model(left)[0]]
         significant = abs(hi - lo) > 2 * half_width
@@ -516,31 +471,31 @@ def _plot_representation(
         f"{dataset}: representation and learner, paired within each "
         f"group\n{metric.upper()}, n_folds={table.shape[0]}, "
         f"{len(reps) - n_tied}/{len(reps)} gaps distinguishable at "
-        f"α={alpha}",
+        f"α={_ALPHA}",
         fontsize=12,
     )
     path = output_dir / f"{dataset}_cv_representation.svg"
     save_fig(fig, path)
-    logger.success(f"{metric.upper()} representation figure saved to {path}")
+    logger.info(f"{metric.upper()} representation figure saved to {path}")
 
 
 def main() -> None:
     """Render the CV figures."""
+    setup_logging()
     args = _parse_args()
-    df = _load_cv_ap(Path(args.data_dir), args.dataset, args.models)
+    df = _load_cv_metrics(Path(args.data_dir), args.dataset, args.models)
     if "ap" not in df.columns:
         raise ValueError("No average precision available in the CV files")
     output_dir = Path(args.output_dir or "figures") / args.dataset / "cv"
     if not args.skip_leaderboard:
-        _plot_leaderboard(df, args.dataset, output_dir, "ap", args.alpha)
+        _plot_leaderboard(df, args.dataset, output_dir, "ap")
     if not args.skip_representation:
-        _plot_representation(df, args.dataset, output_dir, "ap", args.alpha)
+        _plot_representation(df, args.dataset, output_dir, "ap")
         _plot_leaderboard(
             df,
             args.dataset,
             output_dir,
             "ap",
-            args.alpha,
             suffix="representation_ap",
         )
 

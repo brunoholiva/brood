@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from rdkit import Chem, RDLogger
+from rdkit import Chem, RDLogger, rdBase
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 RDLogger.logger().setLevel(RDLogger.ERROR)
@@ -20,7 +20,10 @@ def generic_scaffold(smiles: str) -> str:
     Returns
     -------
     str
-        Canonical SMILES of the generic (decorated) Murcko scaffold.
+        to carbon). When genericization fails RDKit sanitization (e.g.
+        hypervalent metal
+        complexes, where ``MakeScaffoldGeneric`` cannot re-perceive
+        valences), the non-generic scaffold SMILES is returned instead.
 
     Raises
     ------
@@ -33,8 +36,12 @@ def generic_scaffold(smiles: str) -> str:
     scaffold = MurckoScaffold.GetScaffoldForMol(mol)
     if scaffold.GetNumHeavyAtoms() == 0:
         return Chem.MolToSmiles(mol)
-    generic = MurckoScaffold.MakeScaffoldGeneric(scaffold)
-    return Chem.MolToSmiles(generic)
+    try:
+        with rdBase.BlockLogs():
+            generic = MurckoScaffold.MakeScaffoldGeneric(scaffold)
+        return Chem.MolToSmiles(generic)
+    except (Chem.rdchem.MolSanitizeException, Exception):
+        return Chem.MolToSmiles(scaffold)
 
 
 def assign_scaffolds(df: pd.DataFrame) -> pd.DataFrame:

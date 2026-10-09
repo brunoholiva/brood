@@ -8,9 +8,9 @@ and cross-validation folds are scaffold-disjoint via
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
-from loguru import logger
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from sklearn.model_selection import StratifiedGroupKFold
@@ -18,13 +18,15 @@ from tqdm import tqdm
 
 from .scaffolds import assign_scaffolds
 
+logger = logging.getLogger(__name__)
+
 K_NEIGHBORS = 5
 BATCH_SIZE = 5000
 DEFAULT_RANDOM_STATE = 42
 LABEL_SHIFT_TOLERANCE = 0.1
 
 
-def _compute_morgan_fingerprints(
+def compute_morgan_fingerprints(
     smiles_list: list[str], radius: int = 2, fp_size: int = 2048
 ) -> list:
     """Return RDKit Morgan fingerprints for distance calculations."""
@@ -68,13 +70,30 @@ def _score_test_set(test_fps, train_fps):
     return all_dists
 
 
-def _compute_test_distances(
+def compute_test_distances(
     test_df: pd.DataFrame,
     train_df: pd.DataFrame,
     fps: list,
     smiles: list[str],
 ) -> pd.DataFrame:
-    """Compute distance_to_train for test molecules and merge into test_df."""
+    """Compute distance_to_train for test molecules and merge into test_df.
+
+    Parameters
+    ----------
+    test_df : pd.DataFrame
+        Test-set frame with a ``standardized_smiles`` column.
+    train_df : pd.DataFrame
+        Training-set frame with a ``standardized_smiles`` column.
+    fps : list
+        Morgan fingerprints aligned with ``smiles``.
+    smiles : list[str]
+        Ordered SMILES corresponding to ``fps``.
+
+    Returns
+    -------
+    pd.DataFrame
+        ``test_df`` with an added ``distance_to_train`` column.
+    """
     smiles_to_idx = {s: i for i, s in enumerate(smiles)}
     train_fps = [
         fps[smiles_to_idx[s]] for s in train_df["standardized_smiles"]
@@ -115,7 +134,29 @@ def validate_partitions(
     test_df: pd.DataFrame,
     label_shift_tolerance: float = LABEL_SHIFT_TOLERANCE,
 ) -> dict:
-    """Assert scaffold isolation and report label-distribution shift."""
+    """Assert scaffold isolation and report label-distribution shift.
+
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        Training frame with ``scaffold`` and ``target`` columns.
+    test_df : pd.DataFrame
+        Test frame with ``scaffold`` and ``target`` columns.
+    label_shift_tolerance : float
+        Maximum tolerable absolute active-fraction difference.
+
+    Returns
+    -------
+    dict
+        Report with keys ``scaffold_overlap``, ``train_active_fraction``,
+        ``test_active_fraction``, ``absolute_label_shift``, and
+        ``label_shift_within_tolerance``.
+
+    Raises
+    ------
+    ValueError
+        If any scaffold appears in both partitions.
+    """
     overlap = set(train_df["scaffold"]) & set(test_df["scaffold"])
     if overlap:
         raise ValueError(
@@ -137,7 +178,27 @@ def validate_cv_folds(
     cv_df: pd.DataFrame,
     label_shift_tolerance: float = LABEL_SHIFT_TOLERANCE,
 ) -> dict:
-    """Assert scaffold isolation and report label shift across CV folds."""
+    """Assert scaffold isolation and report label shift across CV folds.
+
+    Parameters
+    ----------
+    cv_df : pd.DataFrame
+        Frame with ``fold``, ``scaffold``, and ``target`` columns.
+    label_shift_tolerance : float
+        Maximum tolerable active-fraction spread across folds.
+
+    Returns
+    -------
+    dict
+        Report with keys ``folds``, ``scaffold_overlap``,
+        ``active_fraction_by_fold``, ``active_fraction_spread``, and
+        ``active_fraction_within_tolerance``.
+
+    Raises
+    ------
+    ValueError
+        If any scaffold appears in multiple folds.
+    """
     folds = sorted(cv_df["fold"].unique())
     scaffold_folds = cv_df.groupby("scaffold")["fold"].nunique()
     shared_scaffolds = int((scaffold_folds > 1).sum())
@@ -199,26 +260,6 @@ def split_train_test(
     )
 
 
-def split_train_valid_test(
-    df: pd.DataFrame,
-    train_size: float = 0.8,
-    valid_size: float = 0.1,
-    random_state: int = DEFAULT_RANDOM_STATE,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split a scaffold-annotated DataFrame into train/valid/test."""
-    df = _require_scaffold(df)
-    test_size = 1.0 - train_size - valid_size
-    rest_df, test_df = _shuffle_split_by_scaffold(
-        df, test_size=test_size, random_state=random_state
-    )
-    valid_df, train_df = _shuffle_split_by_scaffold(
-        rest_df,
-        test_size=valid_size / (1.0 - test_size),
-        random_state=random_state,
-    )
-    return train_df, valid_df, test_df
-
-
 def scaffold_split(
     df: pd.DataFrame,
     test_frac: float = 0.1,
@@ -247,7 +288,7 @@ def scaffold_split(
         (train_df, test_df) with a ``scaffold`` column in both, plus
         ``distance_to_train`` in the test set.
     """
-    if len(df) == 0:
+    if df.empty:
         raise ValueError("Cannot split an empty DataFrame.")
     for col in ("standardized_smiles", "target"):
         if col not in df.columns:
@@ -259,7 +300,7 @@ def scaffold_split(
 
     logger.info("Generating Morgan fingerprints for distance scoring...")
     smiles = df["standardized_smiles"].tolist()
-    fps = _compute_morgan_fingerprints(smiles)
+    fps = compute_morgan_fingerprints(smiles)
 
     groups = df["scaffold"].to_numpy()
     targets = df["target"].to_numpy()
@@ -303,7 +344,7 @@ def scaffold_split(
     )
 
     logger.info("Computing distance_to_train for test molecules...")
-    test_df = _compute_test_distances(test_df, train_df, fps, smiles)
+    test_df = compute_test_distances(test_df, train_df, fps, smiles)
     train_df, test_df = _format_output(train_df, test_df)
 
     logger.info(f"Scoring done: {len(test_df)} test molecules")
