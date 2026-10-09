@@ -10,38 +10,32 @@ cheaply.
 
 Usage
 -----
-    python scripts/run_pipeline.py \
-        --config configs/screening.yaml --dataset GNEtolC
-    python scripts/run_pipeline.py \
-        --config configs/representation.yaml --dataset GNEtolC
-    python scripts/run_pipeline.py \
-        --config configs/heldout.yaml --dataset GNEtolC
-    python scripts/run_pipeline.py \
-        --config configs/screening.yaml --dataset GNEtolC --force
+    brood-run --config configs/screening.yaml --dataset GNEtolC
+    brood-run --config configs/representation.yaml --dataset GNEtolC
+    brood-run --config configs/heldout.yaml --dataset GNEtolC
+    brood-run --config configs/screening.yaml --dataset GNEtolC --force
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import shutil
 import signal
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 import yaml
 from loguru import logger
 
-CPU_SLOTS = 2
-
+from brood.core.logging import setup_logging
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TRAIN_SCRIPT = REPO_ROOT / "scripts" / "train.py"
-PLOT_SCRIPT = REPO_ROOT / "scripts" / "plot_cv_comparison.py"
-EVALUATE_SCRIPT = REPO_ROOT / "scripts" / "evaluate.py"
+
+TRAIN_MODULE = "brood.cli.train"
+PLOT_MODULE = "brood.plotting.cv_comparison"
+EVALUATE_MODULE = "brood.cli.evaluate"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -75,24 +69,20 @@ def _parse_args() -> argparse.Namespace:
 # --- process management ----------------------------------------------------
 
 _ACTIVE: set[subprocess.Popen] = set()
-_ACTIVE_LOCK = threading.Lock()
 
 
 def _run(cmd: list[str], env: dict | None = None) -> int:
     proc = subprocess.Popen(cmd, env=env)
-    with _ACTIVE_LOCK:
-        _ACTIVE.add(proc)
+    _ACTIVE.add(proc)
     try:
         return proc.wait()
     finally:
-        with _ACTIVE_LOCK:
-            _ACTIVE.discard(proc)
+        _ACTIVE.discard(proc)
 
 
 def _kill_active() -> None:
-    with _ACTIVE_LOCK:
-        for proc in list(_ACTIVE):
-            proc.terminate()
+    for proc in list(_ACTIVE):
+        proc.terminate()
 
 
 def _interpreter(env: str) -> list[str]:
@@ -100,23 +90,16 @@ def _interpreter(env: str) -> list[str]:
     return [micromamba, "run", "-n", env, "python"]
 
 
-class _Scheduler:
-    """Bound concurrency: one stage at a time per GPU, CPU_SLOTS on CPU."""
-
-    def __init__(self, gpus: list[int]):
-        self.gpu_locks = {g: threading.Lock() for g in gpus}
-        self.cpu = threading.Semaphore(CPU_SLOTS)
-
-    def run(self, cmd: list[str], gpu: int | None) -> int:
-        if gpu is None:
-            with self.cpu:
-                return _run(cmd)
-        with self.gpu_locks[gpu]:
-            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
-            return _run(cmd, env)
-
-
 # --- stage helpers ---------------------------------------------------------
+
+
+def _run_stage(cmd: list[str], gpu: int | None = None) -> int:
+    """Run a command, optionally pinning it to one GPU."""
+    if gpu is not None:
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+    else:
+        env = None
+    return _run(cmd, env)
 
 
 def _model_command(
@@ -129,8 +112,35 @@ def _model_command(
     tune: bool = False,
     tune_only: bool = False,
 ) -> list[str]:
+    """Build a brood-train command list from a model config entry.
+
+    Parameters
+    ----------
+    model : str
+        Model value passed to ``--model`` (defaults to the run key prefix).
+    mcfg : dict
+        Model config entry with ``env`` and optional keys.
+    dataset : str
+        Dataset name.
+    data_dir : str
+        Data directory path.
+    defaults : dict
+        Stage defaults (currently only ``n_trials``).
+    cv : bool
+        Whether to append ``--cv``.
+    tune : bool
+        Whether to append ``--tune`` and ``--n-trials``.
+    tune_only : bool
+        Whether to append ``--tune-only``.
+
+    Returns
+    -------
+    list[str]
+        Command tokens to run through ``_interpreter``.
+    """
     cmd = _interpreter(mcfg["env"]) + [
-        str(TRAIN_SCRIPT),
+        "-m",
+        TRAIN_MODULE,
         "--dataset",
         dataset,
         "--data-dir",
@@ -140,16 +150,12 @@ def _model_command(
     ]
     if mcfg.get("representation"):
         cmd += ["--representation", mcfg["representation"]]
-    if mcfg.get("model") == "tabpfn" and mcfg.get("version"):
-        cmd += ["--tabpfn-version", mcfg["version"]]
     if tune:
         cmd += ["--tune", "--n-trials", str(defaults.get("n_trials", 10))]
         if tune_only:
             cmd += ["--tune-only"]
     if cv:
         cmd += ["--cv"]
-    if mcfg.get("args"):
-        cmd += shlex.split(mcfg["args"])
     return cmd
 
 
@@ -168,11 +174,12 @@ def _evaluate_command(
     would make argparse keep only the last pair.
     """
     cmd = _interpreter("brood") + [
-        str(EVALUATE_SCRIPT),
+        "-m",
+        EVALUATE_MODULE,
         "--dataset",
         dataset,
         "--test-full-path",
-        str(Path(data_dir) / "splits" / f"{dataset}_test.csv"),
+        str(Path(data_dir) / "splits" / dataset / "test.csv"),
         "--output-dir",
         str(Path(data_dir) / "evaluations" / dataset),
         "--figures-dir",
@@ -184,19 +191,33 @@ def _evaluate_command(
 
 
 def _stage(
-    sched: _Scheduler,
     cmd: list[str],
     label: str,
-    gpu: int | None,
+    gpu: int | None = None,
 ) -> bool:
-    """Run a stage through the scheduler; warn and continue on failure."""
+    """Run a stage; warn and continue on failure."""
     logger.info(f"[{label}] {' '.join(cmd)} (gpu={gpu})")
-    rc = sched.run(cmd, gpu)
+    rc = _run_stage(cmd, gpu)
     if rc != 0:
         logger.error(f"[{label}] failed with exit code {rc}")
         return False
-    logger.success(f"[{label}] done")
+    logger.info(f"[{label}] done")
     return True
+
+
+def _ensure(
+    output: Path,
+    cmd: list[str],
+    label: str,
+    *,
+    force: bool,
+    gpu: int | None = None,
+) -> bool:
+    """Run *cmd* unless *output* exists; return whether it is now present."""
+    if not force and output.exists():
+        logger.info(f"[{label}] up to date")
+        return True
+    return _stage(cmd, label, gpu)
 
 
 def _stale(golden: Path, inputs: list[Path]) -> bool:
@@ -207,6 +228,31 @@ def _stale(golden: Path, inputs: list[Path]) -> bool:
     )
 
 
+def _resolve_datasets(
+    cfg: dict,
+    data_dir: Path,
+    requested: str | None,
+    heldout: bool,
+) -> dict[str, dict]:
+    """Resolve the dataset list, optionally limited to ``requested``."""
+    model_config = cfg["models"]
+    configured = cfg.get("datasets")
+    if configured is None:
+        split_name = "test.csv" if heldout else "cv_folds.csv"
+        configured = sorted(
+            path.parent.name
+            for path in (data_dir / "splits").glob(f"*/{split_name}")
+        )
+    if requested:
+        configured = [requested]
+    return {
+        name: {
+            "models": model_config,
+        }
+        for name in configured
+    }
+
+
 # --- dataset pipeline ------------------------------------------------------
 
 
@@ -215,7 +261,6 @@ def _run_heldout(
     dcfg: dict,
     data_dir: Path,
     figures_dir: Path,
-    sched: _Scheduler,
     force: bool,
     defaults: dict,
     heldout_models: list[str],
@@ -238,23 +283,21 @@ def _run_heldout(
             continue
 
         test_csv = runs / model_key / "predictions" / "test.csv"
-        if force or not test_csv.exists():
-            # No --tune and no --cv: reuse the tuned params.json and predict.
-            if not _stage(
-                sched,
-                _model_command(
-                    mcfg.get("model", model_key.split("_")[0]),
-                    mcfg,
-                    name,
-                    str(data_dir),
-                    defaults,
-                ),
-                f"{name}/{model_key} heldout",
-                mcfg.get("gpu"),
-            ):
-                continue
-        else:
-            logger.info(f"[{name}/{model_key} heldout] up to date")
+        # No --tune and no --cv: reuse the tuned params.json and predict.
+        if not _ensure(
+            test_csv,
+            _model_command(
+                mcfg.get("model", model_key.split("_")[0]),
+                mcfg,
+                name,
+                str(data_dir),
+                defaults,
+            ),
+            f"{name}/{model_key} heldout",
+            force=force,
+            gpu=mcfg.get("gpu"),
+        ):
+            continue
         test_outputs[model_key] = test_csv
 
     if not test_outputs:
@@ -262,10 +305,8 @@ def _run_heldout(
         return
 
     _stage(
-        sched,
         _evaluate_command(name, test_outputs, str(data_dir), str(figures_dir)),
         f"{name} evaluate",
-        None,
     )
 
 
@@ -274,22 +315,43 @@ def run_dataset(
     dcfg: dict,
     data_dir: Path,
     figures_dir: Path,
-    sched: _Scheduler,
     force: bool,
     defaults: dict,
     plot_models: list[str] | None,
     repr_plot_models: list[str] | None,
     heldout_models: list[str] | None = None,
 ) -> None:
-    """Run all model + plot stages for one dataset."""
+    """Run all model + plot stages for one dataset.
+
+    Parameters
+    ----------
+    name : str
+        Dataset name.
+    dcfg : dict
+        Dataset config entry with ``models``.
+    data_dir : Path
+        Root data directory.
+    figures_dir : Path
+        Root figures directory.
+    force : bool
+        Re-run stages even if outputs exist.
+    defaults : dict
+        Stage defaults (``n_trials``).
+    plot_models : list[str] | None
+        Runs to include in the leaderboard figure.
+    repr_plot_models : list[str] | None
+        Runs to include in the representation figures.
+    heldout_models : list[str] | None
+        If provided, switch to held-out prediction + evaluation.
+    """
     splits = data_dir / "splits"
     runs = data_dir / "runs" / name
 
     if heldout_models:
-        if not (splits / f"{name}_test.csv").exists():
+        if not (splits / name / "test.csv").exists():
             logger.warning(
                 f"[{name}] missing test split — run "
-                "`python scripts/split_datasets.py` first; skipping dataset"
+                "`brood-split` first; skipping dataset"
             )
             return
         _run_heldout(
@@ -297,17 +359,16 @@ def run_dataset(
             dcfg,
             data_dir,
             figures_dir,
-            sched,
             force,
             defaults,
             heldout_models,
         )
         return
 
-    if not (splits / f"{name}_cv_folds.csv").exists():
+    if not (splits / name / "cv_folds.csv").exists():
         logger.warning(
             f"[{name}] missing CV folds CSV — run "
-            "`python scripts/split_datasets.py` first; skipping dataset"
+            "`brood-split` first; skipping dataset"
         )
         return
 
@@ -319,43 +380,39 @@ def run_dataset(
         params = runs / run_name / "params.json"
 
         if mcfg.get("tune") and mcfg.get("cv_only"):
-            if force or not params.exists():
-                if not _stage(
-                    sched,
-                    _model_command(
-                        mcfg.get("model", model_key.split("_")[0]),
-                        mcfg,
-                        name,
-                        str(data_dir),
-                        defaults,
-                        cv=False,
-                        tune=True,
-                        tune_only=True,
-                    ),
-                    f"{name}/{run_name} tune",
-                    mcfg.get("gpu"),
-                ):
-                    continue
-
-        if force or not cv_csv.exists():
-            model = mcfg.get("model", model_key.split("_")[0])
-            if _stage(
-                sched,
+            if not _ensure(
+                params,
                 _model_command(
-                    model,
+                    mcfg.get("model", model_key.split("_")[0]),
                     mcfg,
                     name,
                     str(data_dir),
                     defaults,
-                    cv=True,
-                    tune=False,
+                    cv=False,
+                    tune=True,
+                    tune_only=True,
                 ),
-                f"{name}/{run_name} cv",
-                mcfg.get("gpu"),
+                f"{name}/{run_name} tune",
+                force=force,
+                gpu=mcfg.get("gpu"),
             ):
-                cv_outputs[run_name] = cv_csv
-        else:
-            logger.info(f"[{name}/{run_name} cv] up to date")
+                continue
+
+        if _ensure(
+            cv_csv,
+            _model_command(
+                mcfg.get("model", model_key.split("_")[0]),
+                mcfg,
+                name,
+                str(data_dir),
+                defaults,
+                cv=True,
+                tune=False,
+            ),
+            f"{name}/{run_name} cv",
+            force=force,
+            gpu=mcfg.get("gpu"),
+        ):
             cv_outputs[run_name] = cv_csv
 
     if not cv_outputs:
@@ -363,7 +420,8 @@ def run_dataset(
 
     def _plot_cmd(models: list[str]) -> list[str]:
         return _interpreter("brood") + [
-            str(PLOT_SCRIPT),
+            "-m",
+            PLOT_MODULE,
             "--dataset",
             name,
             "--data-dir",
@@ -390,7 +448,7 @@ def run_dataset(
                 cmd = _plot_cmd(plot_models)
                 if repr_plot_models is None:
                     cmd += ["--skip-representation"]
-                _stage(sched, cmd, f"{name} plot", None)
+                _stage(cmd, f"{name} plot")
             else:
                 logger.info(f"[{name} plot] up to date")
 
@@ -420,10 +478,8 @@ def run_dataset(
                 # --skip-leaderboard this stage would redraw the leaderboard
                 # from representation models and overwrite it.
                 _stage(
-                    sched,
                     _plot_cmd(repr_plot_models) + ["--skip-leaderboard"],
                     f"{name} plot representations",
-                    None,
                 )
             else:
                 logger.info(f"[{name} plot representations] up to date")
@@ -431,30 +487,25 @@ def run_dataset(
 
 def main() -> None:
     """Run the pipeline stage defined in the YAML config."""
+    setup_logging()
     args = _parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text())
     defaults = cfg.get("defaults", {})
     plot_models = cfg.get("plot_models")
     repr_plot_models = cfg.get("representation_plot_models")
     heldout_models = cfg.get("heldout_models")
-    datasets = cfg["datasets"]
-    if args.dataset:
-        if args.dataset not in datasets:
-            logger.error(f"Unknown dataset {args.dataset}")
-            sys.exit(1)
-        datasets = {args.dataset: datasets[args.dataset]}
-
     data_dir = Path(args.data_dir)
     figures_dir = Path(args.figures_dir)
-    gpus = sorted(
-        {
-            mcfg["gpu"]
-            for dcfg in datasets.values()
-            for mcfg in dcfg["models"].values()
-            if "gpu" in mcfg
-        }
-    )
-    sched = _Scheduler(gpus)
+    try:
+        datasets = _resolve_datasets(
+            cfg, data_dir, args.dataset, heldout=heldout_models is not None
+        )
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
+    if not datasets:
+        logger.error("No datasets configured or split artifacts found")
+        sys.exit(1)
 
     def _on_sigint(*_):
         _kill_active()
@@ -464,12 +515,12 @@ def main() -> None:
 
     try:
         for name, dcfg in datasets.items():
+            dcfg["_config_path"] = args.config
             run_dataset(
                 name,
                 dcfg,
                 data_dir,
                 figures_dir,
-                sched,
                 args.force,
                 defaults,
                 plot_models,
@@ -480,7 +531,7 @@ def main() -> None:
         logger.warning("Interrupted; killed running stages")
         sys.exit(130)
 
-    logger.success("Pipeline stage finished")
+    logger.info("Pipeline stage finished")
 
 
 if __name__ == "__main__":

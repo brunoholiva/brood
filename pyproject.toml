@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brood"
+version = "0.1.0"
+description = "Out-of-Distribution Molecular Evaluation for Antibiotic Discovery"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "rdkit",
+]
+
+[project.scripts]
+brood-split = "brood.cli.split:main"
+brood-train = "brood.cli.train:main"
+brood-evaluate = "brood.cli.evaluate:main"
+brood-plot-cv = "brood.plotting.cv_comparison:main"
+brood-run = "brood.pipeline.runner:main"
+brood-polaris = "brood.cli.polaris:main"
+
+[tool.setuptools.packages.find]
+include = ["brood*"]
+
+[tool.ruff]
+line-length = 79
+target-version = "py311"
+exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # import sorting (like isort)
+    "D",  # docstring rules
+]
+
+ignore = [
+    "D203",  # conflicts with numpy style
+    "D213"
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "E501"]
+"brood/cli/*" = ["E402"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

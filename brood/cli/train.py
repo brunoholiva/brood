@@ -6,14 +6,11 @@ The model and representation are resolved through the central registries in
 
 Usage
 -----
-    python scripts/train.py --dataset GNEtolC --model rf \
+    brood-train --dataset GNEtolC --model rf \
         --representation morgan2048 --tune
-    python scripts/train.py --dataset GNEtolC --model rf \
+    brood-train --dataset GNEtolC --model rf \
         --representation morgan2048 --cv
-    python scripts/train.py --dataset GNEtolC --model tabpfn \
-        --representation morgan2048 --cv
-    python scripts/train.py --dataset GNEtolC --model chemprop --cv
-    python scripts/train.py --dataset GNEtolC --model similarity --cv
+    brood-train --dataset GNEtolC --model chemprop --cv
 """
 
 from __future__ import annotations
@@ -24,18 +21,54 @@ from pathlib import Path
 
 from loguru import logger
 
-from brood.core.argparse import build_base_arg_parser
-from brood.core.artifacts import prediction_dir, run_dir
-from brood.cv.loop import run_cv_model
+from brood.core.artifacts import prediction_dir
+from brood.core.logging import setup_logging
+from brood.cv.loop import load_params, run_cv_model
 from brood.data.loader import save_predictions
 from brood.models import get_model, is_sklearn_model
 from brood.models.registry import list_models
 from brood.representations import list_representations
 
+_TABPFN_MODELS = ("tabpfn", "tabpfn_regression")
+
 
 def _parse_args() -> argparse.Namespace:
-    parser = build_base_arg_parser(
+    parser = argparse.ArgumentParser(
         description="Train one model and write predictions."
+    )
+    parser.add_argument("--dataset", required=True, help="Dataset name")
+    parser.add_argument(
+        "--data-dir",
+        default="data",
+        help="Data directory (default: data)",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        help="Random state (default: 42)",
+    )
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="Run Optuna hyperparameter tuning before final training",
+    )
+    parser.add_argument(
+        "--tune-only",
+        action="store_true",
+        help="Tune and save params without fitting or predicting",
+    )
+    parser.add_argument(
+        "--cv",
+        action="store_true",
+        help="Run scaffold CV evaluation (5 folds) into the model run "
+        "directory",
+    )
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=30,
+        help="Number of tuning trials (default: 30)",
     )
     parser.add_argument(
         "--model",
@@ -53,11 +86,6 @@ def _parse_args() -> argparse.Namespace:
         "--device",
         default="auto",
         help="Device for TabPFN (auto/cpu/cuda)",
-    )
-    parser.add_argument(
-        "--tabpfn-version",
-        default=None,
-        help="TabPFN checkpoint version (default: v3.5)",
     )
     return parser.parse_args()
 
@@ -87,15 +115,14 @@ def _validate_args(args: argparse.Namespace, backend) -> None:
 
 def main() -> None:
     """Tune, cross-validate, or predict depending on the flags."""
+    setup_logging()
     args = _parse_args()
     data_dir = Path(args.data_dir)
     dataset = args.dataset
 
     backend_kwargs = {}
-    if args.model == "tabpfn":
+    if args.model in _TABPFN_MODELS:
         backend_kwargs["device"] = args.device
-        if args.tabpfn_version:
-            backend_kwargs["version"] = args.tabpfn_version
 
     backend = get_model(args.model, **backend_kwargs)
     _validate_args(args, backend)
@@ -114,13 +141,9 @@ def main() -> None:
         if args.tune_only:
             return
 
-    params = backend.default_params()
-    params_path = run_dir(data_dir, dataset, run_name) / "params.json"
-    if params_path.exists() and backend.supports_tuning:
-        import json
-
-        params.update(json.loads(params_path.read_text()))
-        logger.info(f"Using tuned params from {params_path}")
+    params = load_params(data_dir, dataset, run_name, backend.default_params())
+    if args.model in _TABPFN_MODELS:
+        params["random_state"] = args.random_state
 
     if args.cv:
 

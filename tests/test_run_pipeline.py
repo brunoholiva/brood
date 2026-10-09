@@ -10,24 +10,6 @@ import yaml
 
 from brood.data.splitter import assign_cv_folds
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-RUN_PIPELINE = REPO_ROOT / "scripts" / "run_pipeline.py"
-
-DIVERSE_SMILES = [
-    "C1CC1",
-    "C1CC1C",
-    "C1CCC1",
-    "C1CCC1C",
-    "C1CCCC1",
-    "C1CCCC1C",
-    "C1CCCCC1",
-    "C1CCCCC1C",
-    "C1CCCCCC1",
-    "C1CCCCCC1C",
-    "C1CCCCC2CCCCC12",
-    "C1CCCCC2CCCCC1C2",
-]
-
 # 120 unique valid SMILES: 10 ring sizes x 12 substituent-chain lengths, so
 # the molecules also span 10 distinct Murcko scaffolds for the scaffold split.
 # SMILES must be unique: predictions are joined onto molecules by SMILES, so
@@ -41,7 +23,7 @@ UNIQUE_SMILES = [
 def pipeline_root(tmp_path):
     """tmp data-dir + config with two cheap models (no tuning, no GPU)."""
     data = tmp_path / "data"
-    splits = data / "splits"
+    splits = data / "splits" / "demo"
     splits.mkdir(parents=True)
     smis = UNIQUE_SMILES
     y = [i % 2 for i in range(len(smis))]
@@ -55,26 +37,23 @@ def pipeline_root(tmp_path):
             "distance_to_train": [0.5] * 20,
         }
     )
-    train.to_csv(splits / "demo_train.csv", index=False)
-    test.to_csv(splits / "demo_test.csv", index=False)
+    train.to_csv(splits / "train.csv", index=False)
+    test.to_csv(splits / "test.csv", index=False)
     assign_cv_folds(train, n_splits=3).to_csv(
-        splits / "demo_cv_folds.csv", index=False
+        splits / "cv_folds.csv", index=False
     )
 
     config = {
         "defaults": {"n_trials": 5},
-        "datasets": {
-            "demo": {
-                "models": {
-                    "similarity": {"env": "brood", "cv_only": True},
-                    "rf_morgan2048": {
-                        "env": "brood",
-                        "model": "rf",
-                        "representation": "morgan2048",
-                        "cv_only": True,
-                    },
-                }
-            }
+        "datasets": ["demo"],
+        "models": {
+            "similarity": {"env": "brood", "cv_only": True},
+            "rf_morgan2048": {
+                "env": "brood",
+                "model": "rf",
+                "representation": "morgan2048",
+                "cv_only": True,
+            },
         },
     }
     (tmp_path / "pipeline.yaml").write_text(yaml.safe_dump(config))
@@ -95,7 +74,8 @@ def _run_pipeline(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             sys.executable,
-            str(RUN_PIPELINE),
+            "-m",
+            "brood.pipeline.runner",
             "--config",
             str(root / "pipeline.yaml"),
             "--data-dir",
@@ -132,9 +112,7 @@ def test_failed_model_does_not_block_others(pipeline_root):
     """A model that dies mid-run warns and lets the rest finish."""
     data = pipeline_root / "data"
     config = yaml.safe_load((pipeline_root / "pipeline.yaml").read_text())
-    config["datasets"]["demo"]["models"]["similarity"]["model"] = (
-        "does_not_exist"
-    )
+    config["models"]["similarity"]["model"] = "does_not_exist"
     (pipeline_root / "pipeline.yaml").write_text(yaml.safe_dump(config))
 
     res = _run_pipeline(pipeline_root)
@@ -216,7 +194,7 @@ def _make_heldout(root: Path, models: list[str]) -> None:
     config["plot_models"] = None
     config["representation_plot_models"] = None
     config["heldout_models"] = models
-    declared = config["datasets"]["demo"]["models"]
+    declared = config["models"]
     for name in models:
         declared.setdefault(
             name,
@@ -272,7 +250,7 @@ def test_heldout_stage_warns_on_an_undeclared_run(pipeline_root):
     _make_heldout(pipeline_root, ["rf_morgan2048", "not_declared"])
     path = pipeline_root / "pipeline.yaml"
     config = yaml.safe_load(path.read_text())
-    del config["datasets"]["demo"]["models"]["not_declared"]
+    del config["models"]["not_declared"]
     path.write_text(yaml.safe_dump(config))
 
     res = _run_pipeline(pipeline_root)
