@@ -39,20 +39,20 @@ def pipeline_root(tmp_path):
     )
     train.to_csv(splits / "train.csv", index=False)
     test.to_csv(splits / "test.csv", index=False)
-    assign_cv_folds(train, n_splits=3).to_csv(
+    assign_cv_folds(train, n_splits=3, n_repeats=2).to_csv(
         splits / "cv_folds.csv", index=False
     )
 
     config = {
-        "defaults": {"n_trials": 5},
+        "defaults": {"n_trials": 1},
+        "parallel": True,
         "datasets": ["demo"],
         "models": {
-            "similarity": {"env": "brood", "cv_only": True},
+            "similarity": {"env": "brood"},
             "rf_morgan2048": {
                 "env": "brood",
                 "model": "rf",
                 "representation": "morgan2048",
-                "cv_only": True,
             },
         },
     }
@@ -108,6 +108,33 @@ def test_pipeline_runs_all_stages(pipeline_root):
     assert "up to date" in _log(res2)
 
 
+def test_interrupted_cv_run_is_rerun(pipeline_root):
+    """A model is re-run when its final metrics file is missing.
+
+    ``run_cv_model`` rewrites ``predictions/cv.csv`` after every fold, so an
+    interrupted run leaves a partial predictions file. Completion is judged by
+    ``metrics/cv.csv``, written once at the end, so the partial predictions
+    must not count as done.
+    """
+    data = pipeline_root / "data"
+    first = _run_pipeline(pipeline_root)
+    assert first.returncode == 0, first.stderr
+
+    runs = data / "runs" / "demo"
+    assert (runs / "rf_morgan2048" / "predictions" / "cv.csv").exists()
+    rf_metrics = runs / "rf_morgan2048" / "metrics" / "cv.csv"
+    assert rf_metrics.exists()
+    rf_metrics.unlink()  # simulate an interrupted run: no final metrics
+
+    second = _run_pipeline(pipeline_root)
+    log = _log(second)
+
+    assert second.returncode == 0, second.stderr
+    assert rf_metrics.exists()
+    assert "demo/rf_morgan2048 cv] up to date" not in log
+    assert "demo/similarity cv] up to date" in log
+
+
 def test_failed_model_does_not_block_others(pipeline_root):
     """A model that dies mid-run warns and lets the rest finish."""
     data = pipeline_root / "data"
@@ -121,6 +148,22 @@ def test_failed_model_does_not_block_others(pipeline_root):
         data / "runs" / "demo" / "rf_morgan2048" / "predictions" / "cv.csv"
     ).exists()
     assert "failed with exit code" in _log(res)
+
+
+def test_cpu_and_gpu_models_use_separate_lanes():
+    """Lane grouping keeps CPU models off the GPU slot's lane (and vice versa)."""
+    from brood.pipeline.runner import _gpu_lanes
+
+    stages = [
+        ("rf_morgan2048", Path("a"), ["cmd"], None),
+        ("similarity", Path("b"), ["cmd"], None),
+        ("tabpfn_morgan2048", Path("c"), ["cmd"], 0),
+    ]
+
+    lanes = _gpu_lanes(stages)
+
+    assert [s[0] for s in lanes[None]] == ["rf_morgan2048", "similarity"]
+    assert [s[0] for s in lanes[0]] == ["tabpfn_morgan2048"]
 
 
 def test_representation_plot_stage_runs_when_configured(pipeline_root):

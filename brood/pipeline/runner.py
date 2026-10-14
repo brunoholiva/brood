@@ -24,6 +24,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -66,8 +67,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# --- process management ----------------------------------------------------
-
 _ACTIVE: set[subprocess.Popen] = set()
 
 
@@ -88,9 +87,6 @@ def _kill_active() -> None:
 def _interpreter(env: str) -> list[str]:
     micromamba = shutil.which("micromamba") or "/home/bruno/bin/micromamba"
     return [micromamba, "run", "-n", env, "python"]
-
-
-# --- stage helpers ---------------------------------------------------------
 
 
 def _run_stage(cmd: list[str], gpu: int | None = None) -> int:
@@ -127,7 +123,8 @@ def _model_command(
     defaults : dict
         Stage defaults (currently only ``n_trials``).
     cv : bool
-        Whether to append ``--cv``.
+        Whether to append ``--cv`` and ``--n-trials`` (CV tunes per training
+        training split).
     tune : bool
         Whether to append ``--tune`` and ``--n-trials``.
     tune_only : bool
@@ -155,7 +152,7 @@ def _model_command(
         if tune_only:
             cmd += ["--tune-only"]
     if cv:
-        cmd += ["--cv"]
+        cmd += ["--cv", "--n-trials", str(defaults.get("n_trials", 10))]
     return cmd
 
 
@@ -221,11 +218,63 @@ def _ensure(
 
 
 def _stale(golden: Path, inputs: list[Path]) -> bool:
-    """Whether any input is newer than the golden output."""
+    """Whether any input is newer than the final output."""
     return any(
         path.exists() and path.stat().st_mtime > golden.stat().st_mtime
         for path in inputs
     )
+
+
+# A CV model stage: (run name, completion marker, command, GPU slot).
+# The marker is ``metrics/cv.csv``: ``run_cv_model`` writes it once at the end,
+# whereas the raw predictions file is rewritten after every fold, so a partial
+# predictions file must not be read as a finished CV run.
+_CvStage = tuple[str, Path, list[str], int | None]
+
+
+def _gpu_lanes(stages: list[_CvStage]) -> dict[int | None, list[_CvStage]]:
+    """Group stages into resource lanes keyed by GPU slot (None = CPU).
+
+    Two CPU models each saturate every core (``n_jobs=-1``) and two models on
+    the same GPU slot contend for the device, so models within a lane run
+    serially while distinct lanes (CPU vs each GPU) run concurrently.
+    """
+    lanes: dict[int | None, list[_CvStage]] = {}
+    for stage in stages:
+        lanes.setdefault(stage[3], []).append(stage)
+    return lanes
+
+
+def _run_cv_models(
+    name: str,
+    stages: list[_CvStage],
+    force: bool,
+    parallel: bool,
+) -> dict[str, Path]:
+    """Run each model's CV stage, optionally overlapping CPU and GPU lanes."""
+
+    def _drain(lane: list[_CvStage]) -> dict[str, Path]:
+        done: dict[str, Path] = {}
+        for run_name, cv_csv, cmd, gpu in lane:
+            if _ensure(
+                cv_csv,
+                cmd,
+                f"{name}/{run_name} cv",
+                force=force,
+                gpu=gpu,
+            ):
+                done[run_name] = cv_csv
+        return done
+
+    if not parallel:
+        return _drain(stages)
+
+    lanes = _gpu_lanes(stages)
+    cv_outputs: dict[str, Path] = {}
+    with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
+        for lane_outputs in pool.map(_drain, lanes.values()):
+            cv_outputs.update(lane_outputs)
+    return cv_outputs
 
 
 def _resolve_datasets(
@@ -251,9 +300,6 @@ def _resolve_datasets(
         }
         for name in configured
     }
-
-
-# --- dataset pipeline ------------------------------------------------------
 
 
 def _run_heldout(
@@ -283,11 +329,35 @@ def _run_heldout(
             continue
 
         test_csv = runs / model_key / "predictions" / "test.csv"
-        # No --tune and no --cv: reuse the tuned params.json and predict.
+        model = mcfg.get("model", model_key.split("_")[0])
+
+        # Tuned runs need a full-training params.json for the refit. CV tunes
+        # on each training portion, so this is the only place params.json is
+        # produced.
+        if mcfg.get("tune"):
+            if not _ensure(
+                runs / model_key / "params.json",
+                _model_command(
+                    model,
+                    mcfg,
+                    name,
+                    str(data_dir),
+                    defaults,
+                    cv=False,
+                    tune=True,
+                    tune_only=True,
+                ),
+                f"{name}/{model_key} tune",
+                force=force,
+                gpu=mcfg.get("gpu"),
+            ):
+                continue
+
+        # Reuse the tuned params.json for the held-out prediction.
         if not _ensure(
             test_csv,
             _model_command(
-                mcfg.get("model", model_key.split("_")[0]),
+                model,
                 mcfg,
                 name,
                 str(data_dir),
@@ -320,6 +390,7 @@ def run_dataset(
     plot_models: list[str] | None,
     repr_plot_models: list[str] | None,
     heldout_models: list[str] | None = None,
+    parallel: bool = False,
 ) -> None:
     """Run all model + plot stages for one dataset.
 
@@ -343,6 +414,9 @@ def run_dataset(
         Runs to include in the representation figures.
     heldout_models : list[str] | None
         If provided, switch to held-out prediction + evaluation.
+    parallel : bool
+        Overlap the CPU lane with each GPU lane's CV stages. Default is
+        serial (CPU models already use every core).
     """
     splits = data_dir / "splits"
     runs = data_dir / "runs" / name
@@ -372,34 +446,10 @@ def run_dataset(
         )
         return
 
-    cv_outputs: dict[str, Path] = {}
-
-    for model_key, mcfg in dcfg["models"].items():
-        run_name = model_key
-        cv_csv = runs / run_name / "predictions" / "cv.csv"
-        params = runs / run_name / "params.json"
-
-        if mcfg.get("tune") and mcfg.get("cv_only"):
-            if not _ensure(
-                params,
-                _model_command(
-                    mcfg.get("model", model_key.split("_")[0]),
-                    mcfg,
-                    name,
-                    str(data_dir),
-                    defaults,
-                    cv=False,
-                    tune=True,
-                    tune_only=True,
-                ),
-                f"{name}/{run_name} tune",
-                force=force,
-                gpu=mcfg.get("gpu"),
-            ):
-                continue
-
-        if _ensure(
-            cv_csv,
+    stages = [
+        (
+            model_key,
+            runs / model_key / "metrics" / "cv.csv",
             _model_command(
                 mcfg.get("model", model_key.split("_")[0]),
                 mcfg,
@@ -409,11 +459,11 @@ def run_dataset(
                 cv=True,
                 tune=False,
             ),
-            f"{name}/{run_name} cv",
-            force=force,
-            gpu=mcfg.get("gpu"),
-        ):
-            cv_outputs[run_name] = cv_csv
+            mcfg.get("gpu"),
+        )
+        for model_key, mcfg in dcfg["models"].items()
+    ]
+    cv_outputs = _run_cv_models(name, stages, force, parallel)
 
     if not cv_outputs:
         return
@@ -474,9 +524,6 @@ def run_dataset(
                 or any(not svg.exists() for svg in repr_svgs)
                 or any(_stale(svg, repr_inputs) for svg in repr_svgs)
             ):
-                # Figure 1 belongs to the screening stage: without
-                # --skip-leaderboard this stage would redraw the leaderboard
-                # from representation models and overwrite it.
                 _stage(
                     _plot_cmd(repr_plot_models) + ["--skip-leaderboard"],
                     f"{name} plot representations",
@@ -494,6 +541,7 @@ def main() -> None:
     plot_models = cfg.get("plot_models")
     repr_plot_models = cfg.get("representation_plot_models")
     heldout_models = cfg.get("heldout_models")
+    parallel = bool(cfg.get("parallel", False))
     data_dir = Path(args.data_dir)
     figures_dir = Path(args.figures_dir)
     try:
@@ -526,6 +574,7 @@ def main() -> None:
                 plot_models,
                 repr_plot_models,
                 heldout_models,
+                parallel,
             )
     except KeyboardInterrupt:
         logger.warning("Interrupted; killed running stages")

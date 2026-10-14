@@ -1,127 +1,114 @@
-# Representation comparison for the two selected families.
+# Representation comparison for the two selected models.
 #
-# This stage varies the input encoding for the selected families. Reference
+# This stage varies the input encoding for the selected models. Reference
 # runs (chemprop and max-similarity) are listed for the representation figure.
+# Tunable runs re-tune on each CV training portion of the shared repeated
+# 5x5 scaffold CV.
 
 defaults:
   n_trials: 10
+
+# Overlap the CPU lane with the GPU lane's CV stages (models within a lane
+# still run serially: CPU models each use every core, GPU models share a slot).
+parallel: true
 
 plot_models: null
 
 representation_plot_models:
   - similarity
-  - chemprop
-  - rf_morgan2048
   - tabpfn_morgan2048
-  - rf_morgan512
   - tabpfn_morgan512
-  - rf_maccs
   - tabpfn_maccs
-  - rf_rdkit2d
   - tabpfn_rdkit2d
-  - rf_chemeleon
   - tabpfn_chemeleon
-  - rf_morgan_maccs_rdkit2d
   - tabpfn_morgan_maccs_rdkit2d
-  - rf_minimol
   - tabpfn_minimol
+  - lgbm_morgan2048
+  - lgbm_morgan512
+  - lgbm_maccs
+  - lgbm_rdkit2d
+  - lgbm_chemeleon
+  - lgbm_morgan_maccs_rdkit2d
+  - lgbm_minimol
 
-# Pinned: null would glob every cv_folds.csv under data/splits/, including
 datasets:
   - GNEtolC
-  - staph_aureus
 
 models:
-  rf_morgan512:
-    env: brood
-    model: rf
-    representation: morgan512
-    tune: true
-    cv_only: true
-  rf_maccs:
-    env: brood
-    model: rf
-    representation: maccs
-    tune: true
-    cv_only: true
-  rf_rdkit2d:
-    env: brood
-    model: rf
-    representation: rdkit2d
-    tune: true
-    cv_only: true
-  rf_morgan_maccs_rdkit2d:
-    env: brood
-    model: rf
-    representation: morgan_maccs_rdkit2d
-    tune: true
-    cv_only: true
-  rf_chemeleon:
-    env: chemeleon
-    model: rf
-    representation: chemeleon
-    tune: true
-    cv_only: true
-  rf_minimol:
-    env: minimol
-    model: rf
-    representation: minimol
-    tune: true
-    cv_only: true
   tabpfn_morgan512:
     env: tabpfn
     model: tabpfn
     representation: morgan512
     gpu: 0
-    cv_only: true
   tabpfn_maccs:
     env: tabpfn
     model: tabpfn
     representation: maccs
     gpu: 0
-    cv_only: true
   tabpfn_rdkit2d:
     env: tabpfn
     model: tabpfn
     representation: rdkit2d
     gpu: 0
-    cv_only: true
   tabpfn_morgan_maccs_rdkit2d:
     env: tabpfn
     model: tabpfn
     representation: morgan_maccs_rdkit2d
     gpu: 0
-    cv_only: true
   tabpfn_chemeleon:
     env: chemeleon
     model: tabpfn
     representation: chemeleon
     gpu: 0
-    cv_only: true
   tabpfn_minimol:
     env: minimol
     model: tabpfn
     representation: minimol
     gpu: 0
-    cv_only: true
+
+
+  lgbm_morgan2048:
+    env: brood
+    model: lgbm
+    representation: morgan2048
+
+  lgbm_morgan512:
+    env: brood
+    model: lgbm
+    representation: morgan512
+
+  lgbm_maccs:
+    env: brood
+    model: lgbm
+    representation: maccs
+
+  lgbm_rdkit2d:
+    env: brood
+    model: lgbm
+    representation: rdkit2d
+
+  lgbm_morgan_maccs_rdkit2d:
+    env: brood
+    model: lgbm
+    representation: morgan_maccs_rdkit2d
+
+  lgbm_chemeleon:
+    env: brood
+    model: lgbm
+    representation: chemeleon
+
+  lgbm_minimol:
+    env: brood
+    model: lgbm
+    representation: minimol
+
+
   # Reference runs (already produced by screening; listed for plotting).
   similarity:
     env: brood
-    cv_only: true
-  chemprop:
-    env: chemprop
-    model: chemprop
-    gpu: 0
-    cv_only: true
-  rf_morgan2048:
-    env: brood
-    model: rf
-    representation: morgan2048
-    tune: true
-    cv_only: true
+
   tabpfn_morgan2048:
     env: tabpfn
     model: tabpfn
     representation: morgan2048
     gpu: 0
-    cv_only: true
