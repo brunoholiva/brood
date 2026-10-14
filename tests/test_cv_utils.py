@@ -11,7 +11,7 @@ from brood.data.splitter import assign_cv_folds
 
 @pytest.fixture
 def cv_folds_dir(tmp_path):
-    """tmp_path/data with a 3-fold, 6-scaffold CV folds CSV."""
+    """tmp_path/data with a 2x3 repeated CV folds CSV."""
     smis = [
         "C1CC1",
         "C1CC1C",
@@ -27,7 +27,7 @@ def cv_folds_dir(tmp_path):
         "C1CCCCC2CCCCC1C2",
     ]
     df = pd.DataFrame({"standardized_smiles": smis, "target": [0, 1] * 6})
-    cv = assign_cv_folds(df, n_splits=3)
+    cv = assign_cv_folds(df, n_splits=3, n_repeats=2)
     splits = tmp_path / "splits" / "test"
     splits.mkdir(parents=True)
     cv.to_csv(splits / "cv_folds.csv", index=False)
@@ -35,7 +35,7 @@ def cv_folds_dir(tmp_path):
 
 
 def test_run_cv_model_writes_rows(cv_folds_dir):
-    """Trivial constant predictor still yields one row per usable fold."""
+    """Trivial constant predictor yields one row per (repeat, fold)."""
 
     def constant_predict(train_df, test_df):
         return pd.DataFrame(
@@ -45,12 +45,18 @@ def test_run_cv_model_writes_rows(cv_folds_dir):
             }
         )
 
-    out = run_cv_model(
-        "test", cv_folds_dir, "dummy", constant_predict, n_folds=3
-    )
+    out = run_cv_model("test", cv_folds_dir, "dummy", constant_predict)
 
-    assert list(out.columns) == ["model", "fold", "ap", "bedroc", "brier"]
-    assert len(out) == 3
+    assert list(out.columns) == [
+        "model",
+        "repeat",
+        "fold",
+        "ap",
+        "bedroc",
+        "brier",
+    ]
+    assert len(out) == 6
+    assert set(out["repeat"]) == {0, 1}
     assert set(out["fold"]) == {0, 1, 2}
     reloaded = pd.read_csv(
         cv_folds_dir / "runs" / "test" / "dummy" / "metrics" / "cv.csv"

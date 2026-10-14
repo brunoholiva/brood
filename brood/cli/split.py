@@ -2,7 +2,8 @@
 """Batch split all datasets in ``data/raw/`` into train/test.
 
 Writes ``data/splits/<dataset>/{train,test,cv_folds}.csv`` plus a
-manifest for every CSV in the raw data directory.
+manifest for every CSV in the raw data directory, and a per-fold
+class-balance diagnostic figure under ``figures/<dataset>/splits/``.
 
 Usage
 -----
@@ -29,8 +30,10 @@ from brood.data.splitter import (
     validate_cv_folds,
     validate_partitions,
 )
+from brood.plotting.split_diagnostics import plot_cv_class_balance
 
 CV_FOLDS = 5
+CV_REPEATS = 5
 
 TARGET_ALIASES = [
     "target",
@@ -59,6 +62,7 @@ def _split_csv(
     smiles_col: str | None,
     target_col: str | None,
     splits_dir: Path,
+    figures_dir: Path,
 ) -> None:
     df = pd.read_csv(path)
     dataset = path.stem
@@ -97,14 +101,28 @@ def _split_csv(
     train_df.to_csv(out_dir / "train.csv", index=False)
     test_df.to_csv(out_dir / "test.csv", index=False)
 
-    cv_df = assign_cv_folds(train_df, n_splits=CV_FOLDS)
+    cv_df = assign_cv_folds(train_df, n_splits=CV_FOLDS, n_repeats=CV_REPEATS)
     cv_path = out_dir / "cv_folds.csv"
-    cv_df[["standardized_smiles", "target", "scaffold", "fold"]].to_csv(
-        cv_path, index=False
-    )
+    cv_df[
+        [
+            "standardized_smiles",
+            "target",
+            "scaffold",
+            "molecule_index",
+            "repeat",
+            "fold",
+        ]
+    ].to_csv(cv_path, index=False)
     cv_checks = validate_cv_folds(cv_df)
     actual_folds = cv_checks["folds"]
-    logger.info(f"CV folds ({actual_folds}) saved to {cv_path}")
+    actual_repeats = cv_checks["repeats"]
+    logger.info(
+        f"CV folds ({actual_repeats}x{actual_folds}) saved to {cv_path}"
+    )
+    try:
+        plot_cv_class_balance(cv_df, dataset, figures_dir)
+    except Exception as e:
+        logger.error(f"{dataset}: class-balance figure failed — {e}")
 
     (out_dir / "manifest.json").write_text(
         json.dumps(
@@ -112,6 +130,7 @@ def _split_csv(
                 "dataset": dataset,
                 "test_fraction_requested": 0.1,
                 "cv_folds": actual_folds,
+                "cv_repeats": actual_repeats,
                 "random_state": 42,
                 "distance": "mean 5-nearest Morgan-Tanimoto distance",
                 "molecules": len(train_df) + len(test_df),
@@ -149,12 +168,14 @@ def _log_split_stats(
         f"min={dist.min():.3f} mean={dist.mean():.3f} max={dist.max():.3f}"
     )
     fold_stats = [
-        f"fold{fold}: {len(fdf)} ({fdf['target'].mean():.1%} actives, "
+        f"r{repeat}f{fold}: {len(fdf)} "
+        f"({fdf['target'].mean():.1%} actives, "
         f"{fdf['scaffold'].nunique()} scaffolds)"
-        for fold, fdf in cv_df.groupby("fold", sort=True)
+        for (repeat, fold), fdf in cv_df.groupby(["repeat", "fold"], sort=True)
     ]
     logger.info(
-        f"{dataset}: CV folds ({cv_checks['folds']}) — "
+        f"{dataset}: CV folds ({cv_checks['repeats']}x"
+        f"{cv_checks['folds']}) — "
         + " | ".join(fold_stats)
         + f" | scaffold overlap={cv_checks['scaffold_overlap']}"
         + f" | active-fraction spread="
@@ -177,6 +198,11 @@ def _parse_args() -> argparse.Namespace:
         help="Output directory for splits (default: data/splits)",
     )
     parser.add_argument(
+        "--figures-dir",
+        default="figures",
+        help="Root figure directory for split diagnostics (default: figures)",
+    )
+    parser.add_argument(
         "--smiles-col", default=None, help="SMILES column name"
     )
     parser.add_argument(
@@ -191,6 +217,7 @@ def main() -> None:
     args = _parse_args()
     data_dir = Path(args.data_dir)
     splits_dir = Path(args.splits_dir)
+    figures_dir = Path(args.figures_dir)
 
     csvs = sorted(data_dir.glob("*.csv"))
     if not csvs:
@@ -199,7 +226,9 @@ def main() -> None:
 
     logger.info(f"Splitting {len(csvs)} dataset(s)")
     for path in csvs:
-        _split_csv(path, args.smiles_col, args.target_col, splits_dir)
+        _split_csv(
+            path, args.smiles_col, args.target_col, splits_dir, figures_dir
+        )
 
 
 if __name__ == "__main__":

@@ -16,17 +16,22 @@ logger = logging.getLogger(__name__)
 
 
 def load_cv_folds(data_dir: Path, dataset: str) -> pd.DataFrame:
-    """Load the fixed scaffold-CV folds for a dataset.
+    """Load the repeated scaffold-CV folds for a dataset.
 
-    Returns a frame with ``standardized_smiles``, ``target``, ``scaffold``,
-    and ``fold`` columns (written by ``brood-split``). The
-    row order matches the development-split CSV, so a cached feature matrix
-    can be indexed with the fold frame's index.
+    Returns a long frame with ``standardized_smiles``, ``target``,
+    ``scaffold``, ``repeat``, and ``fold`` columns (written by
+    ``brood-split``): every molecule appears once per repeat.
+    ``molecule_index`` is restored as the frame index, so ``frame.index``
+    gives each molecule's positional row in the training split and can
+    index a cached feature matrix directly.
     """
     path = data_dir / "splits" / dataset / "cv_folds.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing CV folds CSV: {path}")
-    return pd.read_csv(path)
+    cv_folds = pd.read_csv(path)
+    if "molecule_index" in cv_folds.columns:
+        cv_folds = cv_folds.set_index("molecule_index")
+    return cv_folds
 
 
 def load_params(
@@ -38,9 +43,9 @@ def load_params(
     """Return tuned params overlaid on ``default``, if they exist.
 
     Tuned params are saved to ``data/runs/<dataset>/<model>/params.json`` by
-    the training script. There is no nested-CV variant: one fixed parameter
-    set is reused by every outer fold, which is what the study protocol
-    assumes.
+    the full-train tuning step. Cross-validation no longer reads this file:
+    tunable backends re-tune on each CV training portion via ``tune_on``.
+    This loader therefore only feeds the held-out refit and untuned models.
     """
     path = run_dir(data_dir, dataset, model_name) / "params.json"
     if path.exists():
@@ -61,16 +66,17 @@ def run_cv_model(
     data_dir: Path,
     model_name: str,
     predict_fn: Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame],
-    n_folds: int = 5,
 ) -> pd.DataFrame:
-    """Evaluate a model on the fixed scaffold-CV folds of the dev set.
+    """Evaluate a model on every repeated scaffold-CV split.
 
-    ``predict_fn(train_df, test_df)`` fits on ``train_df`` and returns a
-    DataFrame with ``predicted_probability`` for every row of ``test_df``.
+    ``predict_fn(train_df, test_df)`` fits on ``train_df`` (the CV training
+    portion) and returns a DataFrame with ``predicted_probability`` for every
+    row of ``test_df`` (the held-out fold). It is called once per
+    (repeat, fold) sample, so a repeated 5x5 CV yields 25 samples.
 
-    Writes raw fold predictions to the model run directory and derived
-    ``metrics/cv.csv`` with one metric row per fold. The held-out test set is
-    never read here.
+    Writes raw predictions to the model run directory and derived
+    ``metrics/cv.csv`` with one metric row per sample. The held-out test set
+    is never read here.
 
     Parameters
     ----------
@@ -82,69 +88,81 @@ def run_cv_model(
         Run name used for output paths.
     predict_fn : Callable
         Function taking train/test frames and returning predictions.
-    n_folds : int
-        Number of CV folds.
 
     Returns
     -------
     pd.DataFrame
-        Concatenated CV predictions for all folds.
+        Per-sample CV metrics for the model.
     """
     cv_folds = load_cv_folds(data_dir, dataset)
+    has_repeat = "repeat" in cv_folds.columns
+    repeats = sorted(cv_folds["repeat"].unique()) if has_repeat else [0]
+    folds = sorted(cv_folds["fold"].unique())
+
     rows = []
     prediction_rows = []
     predictions_path = prediction_dir(data_dir, dataset, model_name) / "cv.csv"
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
     if predictions_path.exists():
         predictions_path.unlink()
-    for fold in range(n_folds):
-        train_df = cv_folds[cv_folds["fold"] != fold]
-        test_df = cv_folds[cv_folds["fold"] == fold]
-        if train_df.empty or test_df.empty:
-            continue
+    for repeat in repeats:
+        repeat_df = (
+            cv_folds[cv_folds["repeat"] == repeat] if has_repeat else cv_folds
+        )
+        for fold in folds:
+            train_df = repeat_df[repeat_df["fold"] != fold]
+            test_df = repeat_df[repeat_df["fold"] == fold]
+            if train_df.empty or test_df.empty:
+                continue
 
-        if train_df["target"].nunique() < 2 or test_df["target"].nunique() < 2:
-            logger.warning(
-                f"{model_name}: fold {fold} has a single class, skipping"
+            if (
+                train_df["target"].nunique() < 2
+                or test_df["target"].nunique() < 2
+            ):
+                logger.warning(
+                    f"{model_name}: repeat {repeat} fold {fold} has a "
+                    "single class, skipping"
+                )
+                continue
+
+            preds = predict_fn(train_df, test_df)
+            prediction_rows.extend(
+                pd.DataFrame(
+                    {
+                        "standardized_smiles": test_df[
+                            "standardized_smiles"
+                        ].to_numpy(),
+                        "target": test_df["target"].to_numpy(),
+                        "repeat": repeat,
+                        "fold": fold,
+                        "predicted_probability": preds[
+                            "predicted_probability"
+                        ].to_numpy(),
+                    }
+                ).to_dict("records")
             )
-            continue
-
-        preds = predict_fn(train_df, test_df)
-        prediction_rows.extend(
-            pd.DataFrame(
+            pd.DataFrame(prediction_rows).to_csv(predictions_path, index=False)
+            ranking = _compute_ranking_metrics(
+                test_df["target"].to_numpy(),
+                preds["predicted_probability"].to_numpy(),
+                20.0,
+            )
+            rows.append(
                 {
-                    "standardized_smiles": test_df[
-                        "standardized_smiles"
-                    ].to_numpy(),
-                    "target": test_df["target"].to_numpy(),
+                    "model": model_name,
+                    "repeat": repeat,
                     "fold": fold,
-                    "predicted_probability": preds[
-                        "predicted_probability"
-                    ].to_numpy(),
+                    "ap": ranking.average_precision,
+                    "bedroc": ranking.bedroc,
+                    "brier": ranking.brier,
                 }
-            ).to_dict("records")
-        )
-        pd.DataFrame(prediction_rows).to_csv(predictions_path, index=False)
-        ranking = _compute_ranking_metrics(
-            test_df["target"].to_numpy(),
-            preds["predicted_probability"].to_numpy(),
-            20.0,
-        )
-        rows.append(
-            {
-                "model": model_name,
-                "fold": fold,
-                "ap": ranking.average_precision,
-                "bedroc": ranking.bedroc,
-                "brier": ranking.brier,
-            }
-        )
-        logger.info(
-            f"{model_name}: fold {fold} — "
-            f"AP={ranking.average_precision:.4f} "
-            f"BEDROC={ranking.bedroc:.4f} "
-            f"Brier={ranking.brier:.4f}"
-        )
+            )
+            logger.info(
+                f"{model_name}: repeat {repeat} fold {fold} — "
+                f"AP={ranking.average_precision:.4f} "
+                f"BEDROC={ranking.bedroc:.4f} "
+                f"Brier={ranking.brier:.4f}"
+            )
 
     if not rows:
         raise RuntimeError(f"{model_name}: no usable CV folds")

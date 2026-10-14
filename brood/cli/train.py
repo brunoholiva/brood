@@ -61,20 +61,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cv",
         action="store_true",
-        help="Run scaffold CV evaluation (5 folds) into the model run "
-        "directory",
+        help="Run repeated scaffold CV (5x5) into the model run directory. "
+        "Tunable models re-tune on each CV training portion.",
     )
     parser.add_argument(
         "--n-trials",
         type=int,
         default=30,
-        help="Number of tuning trials (default: 30)",
+        help="Number of tuning trials per Optuna study (default: 30). "
+        "Under --cv, one study runs per CV training portion.",
     )
     parser.add_argument(
         "--model",
         required=True,
         choices=list_models(),
-        help="Model family to train",
+        help="Model to train",
     )
     parser.add_argument(
         "--representation",
@@ -148,13 +149,23 @@ def main() -> None:
     if args.cv:
 
         def _predict_fold(train_df, test_df):
+            fold_params = params
+            if backend.supports_tuning:
+                fold_params = backend.tune_on(
+                    dataset=dataset,
+                    data_dir=data_dir,
+                    train_df=train_df,
+                    representation=representation,
+                    n_trials=args.n_trials,
+                    random_state=args.random_state,
+                )
             return backend.predict_fold(
                 dataset=dataset,
                 data_dir=data_dir,
                 train_df=train_df,
                 test_df=test_df,
                 representation=representation,
-                params=params,
+                params=fold_params,
             )
 
         run_cv_model(dataset, data_dir, run_name, _predict_fold)

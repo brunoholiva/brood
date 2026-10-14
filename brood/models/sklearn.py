@@ -1,8 +1,9 @@
 """Fixed-representation sklearn learners and their shared tuning protocol.
 
-Every learner here consumes one cached representation matrix. Tuning is light
-and not nested: one small Optuna study per family writes ``params.json``; the
-shared outer 5-fold CV reuses those fixed parameters.
+Every learner here consumes one cached representation matrix. Tuning is a
+small Optuna study (:func:`tune_learner`) run either once on the full
+training set (``tune``, writes ``params.json``) or on each CV training
+training split (``tune_on``, nothing persisted).
 """
 
 from __future__ import annotations
@@ -37,13 +38,13 @@ from brood.representations.registry import get_representation
 
 logger = logging.getLogger(__name__)
 
-#: Inner folds used by every Optuna trial.
+#: Tuning folds used by every Optuna trial.
 INNER_SPLITS = 5
 
 
 @dataclass(frozen=True)
 class Learner:
-    """One model family over one fixed representation."""
+    """One model over one fixed representation."""
 
     name: str
     estimator: object
@@ -147,7 +148,7 @@ _LEARNERS: dict[str, Learner] = {
 
 
 def learner_by_name(name: str) -> Learner | None:
-    """Look up one screening learner by family name."""
+    """Look up one screening model by name."""
     return _LEARNERS.get(name)
 
 
@@ -164,7 +165,7 @@ def tune_learner(
     n_trials: int,
     random_state: int = 42,
 ) -> dict:
-    """Search ``learner``'s small space with inner scaffold CV on AP.
+    """Search ``learner``'s small space with tuning CV on AP.
 
     Parameters
     ----------
@@ -242,7 +243,7 @@ class SklearnBackend(ModelBackend):
             )
 
     def default_params(self) -> dict[str, Any]:
-        """Return fallback hyperparameters for this learner family."""
+        """Return fallback hyperparameters for this model."""
         defaults = {
             "logreg__C": 1.0,
             "rf__n_estimators": 500,
@@ -291,6 +292,46 @@ class SklearnBackend(ModelBackend):
         )
         return x_train, x_test, train_df, test_df
 
+    def tune_on(
+        self,
+        dataset: str,
+        data_dir: Path,
+        train_df: pd.DataFrame,
+        representation: str | None,
+        n_trials: int,
+        random_state: int,
+    ) -> dict[str, Any]:
+        """Tune on one training slice with tuning CV.
+
+        The cached train matrix is indexed by ``train_df``'s positions, so
+        this works both for the full training set and for a CV
+        training split. Nothing is persisted.
+        """
+        if representation is None:
+            raise ValueError(f"{self.name} requires a representation")
+        x_all, _ = self._train_matrix(dataset, representation, data_dir)
+        x = x_all[train_df.index.to_numpy()]
+        groups = (
+            train_df["scaffold"]
+            if "scaffold" in train_df.columns
+            else train_df.index.to_series()
+        )
+        logger.info(
+            f"{self.name}: tuning {n_trials} trials on {len(x)} molecules, "
+            f"{x.shape[1]} features"
+        )
+        tuned = tune_learner(
+            self._learner,
+            x,
+            train_df[TARGET_COL].to_numpy(),
+            groups.to_numpy(),
+            n_trials=n_trials,
+            random_state=random_state,
+        )
+        params = {**self.default_params(), **tuned}
+        params[f"{self.name}__random_state"] = random_state
+        return params
+
     def tune(
         self,
         dataset: str,
@@ -299,32 +340,13 @@ class SklearnBackend(ModelBackend):
         n_trials: int,
         random_state: int,
     ) -> dict[str, Any]:
-        """Search hyperparameters with inner scaffold CV and save params."""
+        """Tune on the full training set and save params."""
         if representation is None:
             raise ValueError(f"{self.name} requires a representation")
-        x_train, train_df = self._train_matrix(
-            dataset, representation, data_dir
+        train_df = pd.read_csv(data_dir / "splits" / dataset / "train.csv")
+        params = self.tune_on(
+            dataset, data_dir, train_df, representation, n_trials, random_state
         )
-        groups = (
-            train_df["scaffold"]
-            if "scaffold" in train_df.columns
-            else train_df.index.to_series()
-        )
-        logger.info(
-            f"{self.run_name(representation)}: tuning {n_trials} trials on "
-            f"{len(x_train)} molecules, {x_train.shape[1]} features"
-        )
-        tuned = tune_learner(
-            self._learner,
-            x_train,
-            train_df[TARGET_COL].to_numpy(),
-            groups.to_numpy(),
-            n_trials=n_trials,
-            random_state=random_state,
-        )
-        params = {**self.default_params(), **tuned}
-        params[f"{self.name}__random_state"] = random_state
-
         out = run_dir(data_dir, dataset, self.run_name(representation))
         out.mkdir(parents=True, exist_ok=True)
         (out / "params.json").write_text(
@@ -340,14 +362,14 @@ class SklearnBackend(ModelBackend):
         representation: str | None,
         params: dict[str, Any],
     ) -> pd.DataFrame:
-        """Fit on the full development set and predict the test set."""
+        """Fit on the full training set and predict the test set."""
         if representation is None:
             raise ValueError(f"{self.name} requires a representation")
         x_train, x_test, train_df, test_df = self._heldout_matrix(
             dataset, representation, data_dir
         )
         name = self.run_name(representation)
-        logger.info(f"{name}: fitting on {len(x_train)} development molecules")
+        logger.info(f"{name}: fitting on {len(x_train)} training molecules")
         pipe = self._learner.build(params)
         pipe.fit(x_train, train_df[TARGET_COL].to_numpy())
         probabilities = pipe.predict_proba(x_test)[:, 1]

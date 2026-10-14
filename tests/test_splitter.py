@@ -127,7 +127,7 @@ class TestDistanceValues:
 
 
 class TestDataIntegrity:
-    """Verify data is correctly partitioned and preserved."""
+    """Verify data is correctly split and preserved."""
 
     def test_no_smiles_overlap(self, diverse_df):
         """Train and test sets have no shared molecules."""
@@ -219,44 +219,60 @@ class TestInputValidation:
 
 
 class TestSplitTrainTest:
-    """Scaffold-disjoint inner splits used for early stopping."""
+    """Scaffold-based tuning splits used for early stopping."""
 
     def test_returns_two_dataframes(self, diverse_df):
-        """split_train_test returns train/valid partitions."""
+        """split_train_test returns train/validation splits."""
         train_df, test_df = split_train_test(diverse_df)
         assert set(train_df["scaffold"]).isdisjoint(test_df["scaffold"])
         assert len(train_df) + len(test_df) == len(diverse_df)
 
 
 class TestAssignCvFolds:
-    """CV fold assignment for cross-model comparison."""
+    """Repeated CV fold assignment for cross-model comparison."""
 
-    def test_adds_fold_column(self, diverse_df):
-        """assign_cv_folds adds an integer fold column."""
-        cv_df = assign_cv_folds(diverse_df, n_splits=3)
+    def test_adds_repeat_and_fold_columns(self, diverse_df):
+        """assign_cv_folds adds repeat and integer fold columns."""
+        cv_df = assign_cv_folds(diverse_df, n_splits=3, n_repeats=2)
         assert "fold" in cv_df.columns
+        assert "repeat" in cv_df.columns
         assert set(cv_df["fold"]) == {0, 1, 2}
+        assert set(cv_df["repeat"]) == {0, 1}
 
-    def test_folds_cover_all_rows(self, diverse_df):
-        """Every molecule gets a fold label."""
-        cv_df = assign_cv_folds(diverse_df, n_splits=3)
-        assert len(cv_df) == len(diverse_df)
+    def test_repeats_cover_all_rows(self, diverse_df):
+        """Every molecule appears once per repeat."""
+        cv_df = assign_cv_folds(diverse_df, n_splits=3, n_repeats=4)
+        assert len(cv_df) == 4 * len(diverse_df)
 
-    def test_folds_scaffold_disjoint(self, diverse_df):
-        """Each scaffold appears in exactly one fold."""
-        cv_df = assign_cv_folds(diverse_df, n_splits=3)
-        scaffold_folds = cv_df.groupby("scaffold")["fold"].nunique()
+    def test_molecule_index_is_positional(self, diverse_df):
+        """Each repeat carries a 0..N-1 positional molecule index."""
+        cv_df = assign_cv_folds(diverse_df, n_splits=3, n_repeats=2)
+        for _, frame in cv_df.groupby("repeat"):
+            assert list(frame["molecule_index"]) == list(
+                range(len(diverse_df))
+            )
+
+    def test_folds_scaffold_disjoint_within_repeat(self, diverse_df):
+        """Each scaffold appears in exactly one fold per repeat."""
+        cv_df = assign_cv_folds(diverse_df, n_splits=3, n_repeats=3)
+        scaffold_folds = cv_df.groupby(["scaffold", "repeat"])[
+            "fold"
+        ].nunique()
         assert (scaffold_folds == 1).all()
 
     def test_deterministic(self, diverse_df):
         """Same input produces identical fold assignments."""
-        cv1 = assign_cv_folds(diverse_df, n_splits=3)
-        cv2 = assign_cv_folds(diverse_df, n_splits=3)
+        cv1 = assign_cv_folds(diverse_df, n_splits=3, n_repeats=2)
+        cv2 = assign_cv_folds(diverse_df, n_splits=3, n_repeats=2)
         assert list(cv1["fold"]) == list(cv2["fold"])
+        assert list(cv1["repeat"]) == list(cv2["repeat"])
 
     def test_reports_fold_balance_and_scaffold_isolation(self, diverse_df):
         """CV validation summarizes the required grouped-CV invariants."""
-        checks = validate_cv_folds(assign_cv_folds(diverse_df, n_splits=3))
+        checks = validate_cv_folds(
+            assign_cv_folds(diverse_df, n_splits=3, n_repeats=2)
+        )
         assert checks["folds"] == 3
+        assert checks["repeats"] == 2
         assert checks["scaffold_overlap"] == 0
         assert set(checks["active_fraction_by_fold"]) == {0, 1, 2}

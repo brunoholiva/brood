@@ -337,6 +337,26 @@ class ChempropBackend(ModelBackend):
         """Return Chemprop architecture and training defaults."""
         return _default_params()
 
+    def tune_on(
+        self,
+        dataset: str,
+        data_dir: Path,
+        train_df: pd.DataFrame,
+        representation: str | None,
+        n_trials: int,
+        random_state: int,
+    ) -> dict[str, Any]:
+        """Tune Chemprop on one training slice with tuning CV."""
+        tuned = run_optuna_tuning(
+            lambda trial: _objective(trial, _build_folds(train_df)),
+            dataset,
+            model_name=self.name,
+            n_trials=n_trials,
+            random_state=random_state,
+            params_path=None,
+        )
+        return {**self.default_params(), **tuned}
+
     def tune(
         self,
         dataset: str,
@@ -345,7 +365,7 @@ class ChempropBackend(ModelBackend):
         n_trials: int,
         random_state: int,
     ) -> dict[str, Any]:
-        """Search Chemprop hyperparameters with inner scaffold CV."""
+        """Tune Chemprop on the full training set and save params."""
         train_df, _ = load_split_data(
             data_dir / "splits" / dataset / "train.csv",
             data_dir / "splits" / dataset / "test.csv",
@@ -369,7 +389,7 @@ class ChempropBackend(ModelBackend):
         representation: str | None,
         params: dict[str, Any],
     ) -> pd.DataFrame:
-        """Train Chemprop on the development set and predict the test set."""
+        """Train Chemprop on the training set and predict the test set."""
         train_df, test_df = load_split_data(
             data_dir / "splits" / dataset / "train.csv",
             data_dir / "splits" / dataset / "test.csv",

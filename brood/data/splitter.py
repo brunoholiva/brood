@@ -1,8 +1,8 @@
 """Scaffold-based OOD splitting and CV fold assignment.
 
 Molecules are grouped by their generic Murcko scaffold. The held-out
-test set is one scaffold-disjoint, label-stratified slice (default 10%),
-and cross-validation folds are scaffold-disjoint via
+test set is one scaffold-based, label-stratified slice (default 10%),
+and each repeated-CV split keeps each scaffold in one fold via
 :class:`StratifiedGroupKFold`.
 """
 
@@ -180,38 +180,47 @@ def validate_cv_folds(
 ) -> dict:
     """Assert scaffold isolation and report label shift across CV folds.
 
+    Isolation is checked *within each repeat*: a scaffold may land in a
+    different fold in another repeat (that is repeated CV), but never twice
+    inside one repeat.
+
     Parameters
     ----------
     cv_df : pd.DataFrame
-        Frame with ``fold``, ``scaffold``, and ``target`` columns.
+        Frame with ``fold``, ``scaffold``, and ``target`` columns, plus an
+        optional ``repeat`` column.
     label_shift_tolerance : float
         Maximum tolerable active-fraction spread across folds.
 
     Returns
     -------
     dict
-        Report with keys ``folds``, ``scaffold_overlap``,
+        Report with keys ``folds``, ``repeats``, ``scaffold_overlap``,
         ``active_fraction_by_fold``, ``active_fraction_spread``, and
         ``active_fraction_within_tolerance``.
 
     Raises
     ------
     ValueError
-        If any scaffold appears in multiple folds.
+        If any scaffold appears in multiple folds of the same repeat.
     """
+    has_repeat = "repeat" in cv_df.columns
     folds = sorted(cv_df["fold"].unique())
-    scaffold_folds = cv_df.groupby("scaffold")["fold"].nunique()
+    repeats = sorted(cv_df["repeat"].unique()) if has_repeat else [0]
+    key = ["scaffold", "repeat"] if has_repeat else ["scaffold"]
+    scaffold_folds = cv_df.groupby(key)["fold"].nunique()
     shared_scaffolds = int((scaffold_folds > 1).sum())
     if shared_scaffolds:
         raise ValueError(
-            f"CV scaffold leakage detected: {shared_scaffolds} scaffolds "
-            "appear in multiple folds."
+            f"CV scaffold leakage detected: {shared_scaffolds} scaffold-"
+            "repeat pairs appear in multiple folds."
         )
 
     fractions = cv_df.groupby("fold")["target"].mean()
     spread = float(fractions.max() - fractions.min())
     return {
         "folds": len(folds),
+        "repeats": len(repeats),
         "scaffold_overlap": shared_scaffolds,
         "active_fraction_by_fold": {
             int(fold): float(fractions[fold]) for fold in folds
@@ -351,33 +360,72 @@ def scaffold_split(
     return train_df, test_df
 
 
+def _balanced_folds(
+    groups: np.ndarray,
+    targets: np.ndarray,
+    n_splits: int,
+    base_seed: int,
+    width: int = 32,
+) -> np.ndarray:
+    """Return the most label-balanced scaffold-based fold assignment.
+
+    Searches ``width`` shuffle seeds starting at ``base_seed`` and keeps the
+    assignment whose per-fold active fractions are closest together.
+    """
+    candidates = []
+    for seed in range(base_seed, base_seed + width):
+        kfold = StratifiedGroupKFold(
+            n_splits=n_splits, shuffle=True, random_state=seed
+        )
+        candidate = np.zeros(len(groups), dtype=int)
+        for fold_id, (_, val_idx) in enumerate(
+            kfold.split(np.arange(len(groups)), targets, groups)
+        ):
+            candidate[val_idx] = fold_id
+        fractions = [
+            targets[candidate == fold_id].mean()
+            for fold_id in range(n_splits)
+        ]
+        candidates.append((max(fractions) - min(fractions), candidate))
+    return min(candidates, key=lambda item: item[0])[1]
+
+
 def assign_cv_folds(
     df: pd.DataFrame,
     n_splits: int = 5,
+    n_repeats: int = 5,
     random_state: int = DEFAULT_RANDOM_STATE,
 ) -> pd.DataFrame:
-    """Assign scaffold-disjoint CV fold labels to a DataFrame.
+    """Assign repeated scaffold-based CV fold labels to a DataFrame.
 
-    Adds a ``fold`` column with integer fold IDs (0..n_splits-1) via
-    :class:`StratifiedGroupKFold`. Using one assignment for all models
-    guarantees identical fold partitions across models.
+    Produces ``n_repeats`` independent splits, each an ``n_splits``-fold
+    scaffold-based, label-balanced split. The result is a long frame: every
+    molecule appears once per repeat with its ``repeat`` and ``fold``. One
+    shared assignment is used for every model, so the 5x5 = 25 CV splits
+    are identical across models.
 
     Parameters
     ----------
     df : pd.DataFrame
         DataFrame with ``scaffold`` and ``target`` columns.
     n_splits : int
-        Number of CV folds.
+        Number of CV folds per repeat.
+    n_repeats : int
+        Number of repeats.
     random_state : int
         Seed for deterministic fold assignment.
 
     Returns
     -------
     pd.DataFrame
-        Copy of ``df`` with a ``fold`` column.
+        Copy of ``df`` repeated ``n_repeats`` times with ``repeat``, ``fold``,
+        and ``molecule_index`` columns. ``molecule_index`` is the positional
+        row in the training split, used to index cached feature matrices.
     """
     if n_splits < 2:
         raise ValueError(f"n_splits must be at least 2, got {n_splits}.")
+    if n_repeats < 1:
+        raise ValueError(f"n_repeats must be at least 1, got {n_repeats}.")
     df = _require_scaffold(df)
     n_groups = df["scaffold"].nunique()
     min_class_count = min(np.bincount(df["target"].to_numpy()))
@@ -387,23 +435,16 @@ def assign_cv_folds(
 
     groups = df["scaffold"].to_numpy()
     targets = df["target"].to_numpy()
-    candidates = []
-    for seed in range(random_state, random_state + 32):
-        kfold = StratifiedGroupKFold(
-            n_splits=n_splits, shuffle=True, random_state=seed
+    parts = []
+    for repeat in range(n_repeats):
+        part = df.copy()
+        part["repeat"] = repeat
+        part["molecule_index"] = np.arange(len(df))
+        part["fold"] = _balanced_folds(
+            groups, targets, n_splits, random_state + repeat * 100
         )
-        candidate = np.zeros(len(df), dtype=int)
-        for fold_id, (_, val_idx) in enumerate(
-            kfold.split(df, targets, groups)
-        ):
-            candidate[val_idx] = fold_id
-        fractions = [
-            targets[candidate == fold_id].mean() for fold_id in range(n_splits)
-        ]
-        candidates.append((max(fractions) - min(fractions), candidate))
-    _, fold = min(candidates, key=lambda item: item[0])
+        parts.append(part)
 
-    out = df.copy()
-    out["fold"] = fold
+    out = pd.concat(parts, ignore_index=False)
     validate_cv_folds(out)
     return out

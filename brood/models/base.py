@@ -1,7 +1,7 @@
 """Model backend interface for brood.
 
 A model backend knows how to tune, predict on held-out data, and predict one
-CV fold for one model family. The unified ``brood-train`` driver looks up
+CV fold for one model. The unified ``brood-train`` driver looks up
 backends by name in :mod:`brood.models.registry`.
 """
 
@@ -15,7 +15,7 @@ import pandas as pd
 
 
 class ModelBackend(ABC):
-    """One trainable model family.
+    """One trainable model.
 
     Implementations must be importable without their optional dependencies
     raising (e.g. chemprop, tabpfn) so that the registry can be inspected in
@@ -64,6 +64,46 @@ class ModelBackend(ABC):
             Best hyperparameters.
         """
 
+    def tune_on(
+        self,
+        dataset: str,
+        data_dir: Path,
+        train_df: pd.DataFrame,
+        representation: str | None,
+        n_trials: int,
+        random_state: int,
+    ) -> dict[str, Any]:
+        """Tune on an arbitrary training frame and return params.
+
+        Used by cross-validation to tune on the training portion (the four
+        training folds) before refitting on that portion. Unlike
+        :meth:`tune`, nothing is persisted. Backends that do not tune inherit
+        this default and raise.
+
+        Parameters
+        ----------
+        dataset : str
+            Dataset name.
+        data_dir : Path
+            Root data directory.
+        train_df : pd.DataFrame
+            Outer training slice to tune on.
+        representation : str | None
+            Representation name, or None for SMILES-based models.
+        n_trials : int
+            Number of Optuna trials.
+        random_state : int
+            Random seed for the sampler.
+
+        Returns
+        -------
+        dict[str, Any]
+            Best hyperparameters.
+        """
+        raise RuntimeError(
+            f"{self.name} does not support hyperparameter tuning."
+        )
+
     @abstractmethod
     def predict_held_out(
         self,
@@ -72,7 +112,7 @@ class ModelBackend(ABC):
         representation: str | None,
         params: dict[str, Any],
     ) -> pd.DataFrame:
-        """Fit on the full development set and predict the held-out test set.
+        """Fit on the full training set and predict the held-out test set.
 
         Parameters
         ----------

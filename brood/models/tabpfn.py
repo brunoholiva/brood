@@ -229,7 +229,7 @@ class TabPFNBackend(ModelBackend):
         representation: str | None,
         params: dict[str, Any],
     ) -> pd.DataFrame:
-        """Fit TabPFN on the full development set and predict the test set."""
+        """Fit TabPFN on the full training set and predict the test set."""
         if representation is None:
             raise ValueError("tabpfn requires a representation")
         x_train, y_train, x_test, _, smiles_test = self._load_features(
@@ -264,10 +264,11 @@ class TabPFNBackend(ModelBackend):
             raise ValueError("tabpfn requires a representation")
         x_train = self._load_train_features(dataset, representation, data_dir)
         cv_folds = load_cv_folds(data_dir, dataset)
-        if len(cv_folds) != len(x_train):
+        n_molecules = cv_folds.index.nunique()
+        if n_molecules != len(x_train):
             raise ValueError(
                 f"Cached train features ({len(x_train)} rows) do not match "
-                f"CV folds ({len(cv_folds)} rows); re-split and re-run."
+                f"CV folds ({n_molecules} molecules); re-split and re-run."
             )
         train_idx = train_df.index.to_numpy()
         test_idx = test_df.index.to_numpy()
@@ -301,7 +302,7 @@ class TabPFNRegressionBackend(TabPFNBackend):
         representation: str | None,
         params: dict[str, Any],
     ) -> pd.DataFrame:
-        """Fit TabPFN regression on development data and predict test data."""
+        """Fit TabPFN regression on training data and predict test data."""
         if representation is None:
             raise ValueError("tabpfn regression requires a representation")
         x_train, y_train, x_test, _, smiles_test = self._load_features(
@@ -336,10 +337,11 @@ class TabPFNRegressionBackend(TabPFNBackend):
             raise ValueError("tabpfn regression requires a representation")
         x_train = self._load_train_features(dataset, representation, data_dir)
         cv_folds = load_cv_folds(data_dir, dataset)
-        if len(cv_folds) != len(x_train):
+        n_molecules = cv_folds.index.nunique()
+        if n_molecules != len(x_train):
             raise ValueError(
                 f"Cached train features ({len(x_train)} rows) do not match "
-                f"CV folds ({len(cv_folds)} rows); re-split and re-run."
+                f"CV folds ({n_molecules} molecules); re-split and re-run."
             )
         train_idx = train_df.index.to_numpy()
         test_idx = test_df.index.to_numpy()
