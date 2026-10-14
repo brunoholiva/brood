@@ -6,23 +6,23 @@ This repository provides the code for an investigation on predictor models for *
 
 1. Split a collected (usually from literature) antimicrobial activity dataset, using generic scaffolds to split a 10% set that **will not be used** until the end of analysis.
 
-2. Perform a light screening with model architectures and algorithms (all using ECFPs as representation if needed).
+2. Perform a screening with model architectures and algorithms (all using ECFPs as a representation if needed).
 
 3. The best performing algorithms are selected to be trained with a bunch of molecular representations.
 
-4. Both the algorithm screening and the molecular representations are evaluated with 5-fold cross-validation on the 90% data. The held-out test set is used only at the end, after all decisions have been made.
+4. Both the algorithm screening and the molecular representations are evaluated with 5x5-fold cross-validation on the 90% data. The held-out test set is used only at the end, after all decisions have been made.
 
 ---
 
 ## Polaris Benchmarking
 
-Some interesting combinations are being applied to datasets beyond antibiotic activity. The [Polaris benchmark framework](https://polarishub.io/) is interesting for that: it's highly curated, easily testable, and since its tasks are varied, we can have a sense if the model works for other domains. For now, [TabPFN 3.5](https://github.com/PriorLabs/TabPFN) with either [MiniMol](https://github.com/graphcore-research/minimol) or [CheMeleon](https://github.com/JacksonBurns/chemeleon) learned representations is being employed.
+Some interesting combinations are being applied to datasets beyond antibiotic activity. The [Polaris benchmark framework](https://polarishub.io/) is interesting for that: it's highly curated, easily testable, and since its tasks are varied, we can have a sense if a strategy works for other domains. For now, [TabPFN 3.5](https://github.com/PriorLabs/TabPFN) with either [MiniMol](https://github.com/graphcore-research/minimol) or [CheMeleon](https://github.com/JacksonBurns/chemeleon) learned representations is being employed.
 
 ---
 
 ## Screening
 
-All screening models use Morgan ECFP4 with 2048 bits, except when the algorithm is dependent on a specific representation (such as [Chemprop](https://github.com/chemprop/chemprop)).
+All screening models use Morgan ECFP4 with 2048 bits, except when the algorithm is dependent on a specific representation (such as Chemprop).
 
 - Logistic regression
 - Random forest
@@ -31,18 +31,15 @@ All screening models use Morgan ECFP4 with 2048 bits, except when the algorithm 
 - [Chemprop v2](https://github.com/chemprop/chemprop)
 - Max-similarity baseline
 
-Trainable models receive the same light tuning budget: 10 Optuna trials. Each trial uses the fixed 5-fold scaffold partition on the training set. The best parameter set is selected once, then fixed for the CV runs.
-
-This is intentionally not a nested CV: tuning is not repeated separately inside each outer fold, as this is a fast screening operation.
-
+Tunable models receive the same tuning budget: 10 Optuna trials per fold (which is internally split)
 ---
 
 ## Representations
 
 | Representation | Dims | Notes |
 |:---------------|-----:|:------|
-| Morgan ECFP4 2048 | 2048 | screening representation, kept as the anchor |
-| Morgan ECFP4 512 | 512 | same radius |
+| Morgan ECFP4 2048 | 2048 | screening representation|
+| Morgan ECFP4 512 | 512 |  |
 | MACCS | 167 | predefined structural keys |
 | RDKit2D | 200 | 0/1D/2D physicochemical descriptors from descriptastorus |
 | CheMeleon | 2048 | pretrained chemprop MPNN embeddings |
@@ -81,40 +78,43 @@ This is a temporary and messy solution.
 
 For now the antibiotic study uses the following datasets:
 
-| Dataset | Source | Notes |
+| Dataset | Source | Description |
 |:--------|:-------|:------|
-| `GNEtolC` | literature-curated Gram-negative *E. coli* tolC strain | the current study dataset |
+| `GNEtolC` | [Paper](https://www.nature.com/articles/s41587-025-02814-6)  | *E. coli* Delta-tolC strain
 
 Raw CSVs live in `data/raw/`.
 
----
 
 ## How it works
 
 | Command | What it does | Writes |
 |---------|--------------|--------|
-| `brood-split` | scaffold-disjoint train/test split + fixed 5-fold CV assignment for every CSV in `data/raw/` | `data/splits/<dataset>/train.csv`, `test.csv`, `cv_folds.csv` |
+| `brood-split` | generic scaffold based train/test split + repeat and fold information `data/raw/` | `data/splits/<dataset>/train.csv`, `test.csv`, `cv_folds.csv` |
 | `brood-run` | YAML-driven pipeline stage (screening, representation, held-out) | per-run artifacts + figures (see steps below) |
 | `brood-polaris` | train TabPFN on a Polaris `tdcommons` benchmark, evaluate locally | `data/polaris_results/<task>/tabpfn_<rep>/` |
 | `brood-train` | one model on one dataset (tune, `--cv`, or held-out predict) | `data/runs/<dataset>/<model>/` |
 | `brood-evaluate` | score prediction files against a held-out test set | `data/evaluations/<dataset>/` |
 | `brood-plot-cv` | CV comparison figures from `metrics/cv.csv` files | `figures/<dataset>/cv/*.svg` |
 
-Outputs under `data/` and `figures/` (both gitignored):
+Outputs under `data/` and `figures/`:
 
 ```
 data/
 ├── raw/                  input CSVs
 ├── splits/<dataset>/     train.csv · test.csv · cv_folds.csv
-├── features/<dataset>/<representation>/   cached .npy (regenerable)
+├── features/<dataset>/<representation>/   cached .npy
 ├── runs/<dataset>/<run>/ params.json · predictions/{cv,test}.csv · metrics/cv.csv
 ├── evaluations/<dataset>/ merged_results.csv · metrics.csv
 └── polaris_results/<task>/tabpfn_<rep>/ predictions.csv · metrics.csv · metadata.json
 figures/<dataset>/{cv,heldout}/
 ```
+---
 
-`splits/` and `features/` are deterministic and regenerable; `runs/`,
-`evaluations/`, `polaris_results/`, and `figures/` are derived study outputs.
+## Comparing models
+
+Every run is scored on the same 5 repeats × 5 folds of cross-validation, so all runs see the same splits and can be compared run by run. The CV figures rank them by average precision (AP): `<dataset>_cv_ap.svg` ranks the screening runs, `<dataset>_cv_representation.svg` compares representations, and `<dataset>_cv_representation_ap.svg` ranks the representation runs.
+
+Whether two runs really differ is judged with a repeated-measures test. By default (`--test auto`) this is a repeated-measures ANOVA with Tukey HSD; when its assumptions do not hold, it falls back to the rank-based Friedman test with Conover-Holm corrections. `--test parametric` and `--test nonparametric` force one path.
 
 ---
 
@@ -126,13 +126,12 @@ figures/<dataset>/{cv,heldout}/
    brood-split
    ```
    Do not re-run this later — it would invalidate the fixed CV folds.
-3. Screen model families on ECFP4/2048:
+3. Screen models on ECFP4/2048:
    ```bash
    brood-run --config configs/screening.yaml --dataset GNEtolC
    ```
-   Inspect `figures/GNEtolC/cv/GNEtolC_cv_ap.svg` (leaderboard, mean AP ± blocked
-   Tukey half-width) and confirm the two best families.
-4. Compare representations for those families:
+   Inspect `figures/GNEtolC/cv/GNEtolC_cv_ap.svg` and confirm the best algorithms.
+4. Compare representations for those models:
    ```bash
    brood-run --config configs/representation.yaml --dataset GNEtolC
    ```
@@ -142,8 +141,7 @@ figures/<dataset>/{cv,heldout}/
    ```bash
    brood-run --config configs/heldout.yaml --dataset GNEtolC
    ```
-   Inspect `figures/GNEtolC/heldout/GNEtolC_heldout_pr.svg`. The test split is
-   spend-once; expect held-out AP at or below CV AP.
+   Inspect `figures/GNEtolC/heldout/GNEtolC_heldout_pr.svg`.
 
 ---
 
@@ -169,16 +167,13 @@ cell per dataset. Uploads reuse the
 `configs/heldout.yaml` share a schema:
 
 - `defaults: {n_trials}` — Optuna tuning budget for trainable runs.
-- `datasets` — datasets to run; a pinned list (null would glob every
-  `cv_folds.csv` under `data/splits/`).
+- `datasets` — datasets to run;
 - `models` — one entry per run:
   ```yaml
   rf_morgan512:
     env: brood            # conda env that runs this model
     model: rf             # registry key (logreg/rf/lgbm/tabpfn/chemprop/similarity)
     representation: morgan512
-    tune: true            # 10-trial inner-CV Optuna search, then fixed params.json
-    cv_only: true         # development-time run; do not touch the test split
     gpu: 0                # TabPFN/Chemprop GPUs
   ```
 - `plot_models` / `representation_plot_models` — runs shown in the CV figures.

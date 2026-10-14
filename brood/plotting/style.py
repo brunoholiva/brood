@@ -12,7 +12,7 @@ from matplotlib import rcParams
 
 _PALETTE = sns.color_palette("colorblind")
 
-#: One colour per learner family; grey is reserved for the naive baseline.
+#: One colour per model; grey is reserved for the naive baseline.
 LEARNER_COLORS = {
     "tabpfn": _PALETTE[0],
     "rf": _PALETTE[1],
