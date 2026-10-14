@@ -19,10 +19,8 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedGroupKFold, cross_val_score
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
 from brood.core.artifacts import run_dir
 from brood.core.constants import PREDICTION_COL, SMILES_COL, TARGET_COL
@@ -49,14 +47,10 @@ class Learner:
     name: str
     estimator: object
     search_space: Callable
-    scaling: bool = False
 
     def build(self, params: dict) -> Pipeline:
         """Return an unfitted pipeline for one configuration."""
-        steps = []
-        if self.scaling:
-            steps.append(("scale", StandardScaler()))
-        steps.append((self.name, clone(self.estimator)))
+        steps = [(self.name, clone(self.estimator))]
         relevant = {
             key: value
             for key, value in params.items()
@@ -80,12 +74,6 @@ def _rf_space(trial, n_features: int) -> dict:
     }
 
 
-def _logreg_space(trial, n_features: int) -> dict:
-    return {
-        "logreg__C": trial.suggest_float("logreg__C", 1e-3, 1e2, log=True),
-    }
-
-
 def _lgbm_space(trial, n_features: int) -> dict:
     return {
         "lgbm__n_estimators": trial.suggest_int(
@@ -104,14 +92,6 @@ def _lgbm_space(trial, n_features: int) -> dict:
 def _screening_learners() -> list[Learner]:
     """Return the fixed-representation learners available in this env."""
     learners = [
-        Learner(
-            name="logreg",
-            estimator=LogisticRegression(
-                class_weight="balanced", max_iter=2000
-            ),
-            search_space=_logreg_space,
-            scaling=True,
-        ),
         Learner(
             name="rf",
             estimator=RandomForestClassifier(
@@ -228,7 +208,7 @@ def tune_learner(
 
 
 class SklearnBackend(ModelBackend):
-    """Backend for logistic regression, random forest, and LightGBM."""
+    """Backend for random forest and LightGBM."""
 
     supports_tuning = True
     needs_features = True
@@ -245,7 +225,6 @@ class SklearnBackend(ModelBackend):
     def default_params(self) -> dict[str, Any]:
         """Return fallback hyperparameters for this model."""
         defaults = {
-            "logreg__C": 1.0,
             "rf__n_estimators": 500,
             "rf__max_depth": None,
             "rf__min_samples_leaf": 1,

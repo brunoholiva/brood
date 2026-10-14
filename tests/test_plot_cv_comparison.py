@@ -132,24 +132,23 @@ def test_friedman_conover_returns_a_symmetric_p_matrix():
         ("tabpfn_morgan512", ("tabpfn", "morgan512")),
         ("rf_morgan_maccs_rdkit2d", ("rf", "morgan_maccs_rdkit2d")),
         ("chemprop", ("chemprop", "")),
-        ("similarity", ("similarity", "")),
+        ("knn", ("knn", "")),
     ],
 )
 def test_split_model(name, expected):
     assert _split_model(name) == expected
 
 
-def test_every_known_learner_gets_its_family_colour():
+def test_every_known_model_gets_its_colour():
     """Regression: a missing representation suffix used to send chemprop and
-    similarity to the unknown-run grey, so they looked identical in every
+    knn to the unknown-run grey, so it looked identical in every
     figure and vanished from the leaderboard legend."""
     runs = [
         "chemprop",
-        "similarity",
+        "knn",
         "tabpfn_morgan2048",
         "rf_morgan2048",
         "lgbm_morgan2048",
-        "logreg_morgan2048",
     ]
     colors = [_model_color(run) for run in runs]
     assert len(set(colors)) == len(runs)
@@ -219,7 +218,7 @@ def test_main_renders_both_figures(tmp_path, monkeypatch):
         {"model": model, "sample": f"r0f{fold}", "ap": 0.1 * i + 0.01 * fold}
         for i, model in enumerate(
             [
-                "similarity",
+                "knn",
                 "lgbm_maccs",
                 "lgbm_rdkit2d",
                 "tabpfn_maccs",
@@ -269,7 +268,7 @@ def test_skip_leaderboard_draws_only_the_representation_figure(
     rows = [
         {"model": model, "sample": f"r0f{fold}", "ap": 0.1 * i + 0.01 * fold}
         for i, model in enumerate(
-            ["similarity", "lgbm_maccs", "tabpfn_maccs", "tabpfn_rdkit2d"]
+            ["knn", "lgbm_maccs", "tabpfn_maccs", "tabpfn_rdkit2d"]
         )
         for fold in (0, 1, 2)
     ]

@@ -48,7 +48,7 @@ def pipeline_root(tmp_path):
         "parallel": True,
         "datasets": ["demo"],
         "models": {
-            "similarity": {"env": "brood"},
+            "knn": {"env": "brood"},
             "rf_morgan2048": {
                 "env": "brood",
                 "model": "rf",
@@ -101,7 +101,7 @@ def test_pipeline_runs_all_stages(pipeline_root):
 
     runs = data / "runs" / "demo"
     assert (runs / "rf_morgan2048" / "predictions" / "cv.csv").exists()
-    assert (runs / "similarity" / "predictions" / "cv.csv").exists()
+    assert (runs / "knn" / "predictions" / "cv.csv").exists()
 
     res2 = _run_pipeline(pipeline_root)
     assert res2.returncode == 0, res2.stderr
@@ -132,14 +132,14 @@ def test_interrupted_cv_run_is_rerun(pipeline_root):
     assert second.returncode == 0, second.stderr
     assert rf_metrics.exists()
     assert "demo/rf_morgan2048 cv] up to date" not in log
-    assert "demo/similarity cv] up to date" in log
+    assert "demo/knn cv] up to date" in log
 
 
 def test_failed_model_does_not_block_others(pipeline_root):
     """A model that dies mid-run warns and lets the rest finish."""
     data = pipeline_root / "data"
     config = yaml.safe_load((pipeline_root / "pipeline.yaml").read_text())
-    config["models"]["similarity"]["model"] = "does_not_exist"
+    config["models"]["knn"]["model"] = "does_not_exist"
     (pipeline_root / "pipeline.yaml").write_text(yaml.safe_dump(config))
 
     res = _run_pipeline(pipeline_root)
@@ -156,19 +156,19 @@ def test_cpu_and_gpu_models_use_separate_lanes():
 
     stages = [
         ("rf_morgan2048", Path("a"), ["cmd"], None),
-        ("similarity", Path("b"), ["cmd"], None),
+        ("knn", Path("b"), ["cmd"], None),
         ("tabpfn_morgan2048", Path("c"), ["cmd"], 0),
     ]
 
     lanes = _gpu_lanes(stages)
 
-    assert [s[0] for s in lanes[None]] == ["rf_morgan2048", "similarity"]
+    assert [s[0] for s in lanes[None]] == ["rf_morgan2048", "knn"]
     assert [s[0] for s in lanes[0]] == ["tabpfn_morgan2048"]
 
 
 def test_representation_plot_stage_runs_when_configured(pipeline_root):
     """A configured representation_plot_models adds a second plot stage."""
-    _make_cv_only(pipeline_root, ["similarity", "rf_morgan2048"])
+    _make_cv_only(pipeline_root, ["knn", "rf_morgan2048"])
     res = _run_pipeline(pipeline_root)
     assert res.returncode == 0, res.stderr
     assert "plot representations" in _log(res)
@@ -196,7 +196,7 @@ def test_representation_stage_does_not_overwrite_the_leaderboard(
     leaderboard = figures / "demo_cv_ap.svg"
     leaderboard.write_text("<svg>screening leaderboard</svg>")
 
-    _make_cv_only(pipeline_root, ["similarity", "rf_morgan2048"])
+    _make_cv_only(pipeline_root, ["knn", "rf_morgan2048"])
     res = _run_pipeline(pipeline_root)
     log = _log(res)
 
@@ -213,7 +213,7 @@ def test_screening_stage_leaves_representation_figures_absent(pipeline_root):
     path = pipeline_root / "pipeline.yaml"
     config = yaml.safe_load(path.read_text())
     config.pop("representation_plot_models", None)
-    config["plot_models"] = ["similarity", "rf_morgan2048"]
+    config["plot_models"] = ["knn", "rf_morgan2048"]
     path.write_text(yaml.safe_dump(config))
 
     res = _run_pipeline(pipeline_root)
@@ -229,7 +229,7 @@ def test_screening_stage_leaves_representation_figures_absent(pipeline_root):
 def _make_heldout(root: Path, models: list[str]) -> None:
     """Rewrite the config as a held-out stage over *models*.
 
-    Keeps whatever the fixture already declared for a run (e.g. ``similarity``
+    Keeps whatever the fixture already declared for a run (e.g. ``knn``
     has no ``model`` key) and synthesises an entry only for a new name.
     """
     path = root / "pipeline.yaml"
@@ -252,14 +252,14 @@ def _make_heldout(root: Path, models: list[str]) -> None:
 
 def test_heldout_stage_predicts_then_evaluates(pipeline_root):
     """Held-out runs write test.csv, then one evaluate stage scores them."""
-    _make_heldout(pipeline_root, ["rf_morgan2048", "similarity"])
+    _make_heldout(pipeline_root, ["rf_morgan2048", "knn"])
     res = _run_pipeline(pipeline_root)
     log = _log(res)
 
     assert res.returncode == 0, res.stderr
     runs = pipeline_root / "data" / "runs" / "demo"
     assert (runs / "rf_morgan2048" / "predictions" / "test.csv").exists()
-    assert (runs / "similarity" / "predictions" / "test.csv").exists()
+    assert (runs / "knn" / "predictions" / "test.csv").exists()
 
     # The held-out stage must not launch CV work or CV plots.
     assert "--cv" not in log

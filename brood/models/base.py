@@ -25,7 +25,7 @@ class ModelBackend(ABC):
 
     name: str
     #: Whether this model consumes a pre-computed feature matrix. Graph models
-    #: and the similarity baseline operate on SMILES directly.
+    #: and the KNN model operates on SMILES directly.
     needs_features: bool = True
     #: Whether this model supports hyperparameter tuning.
     supports_tuning: bool = True

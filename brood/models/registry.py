@@ -38,9 +38,6 @@ class _LazyBackend:
 
 #: Single source of truth for model backends.
 MODEL_REGISTRY: dict[str, _LazyBackend] = {
-    "logreg": _LazyBackend(
-        "brood.models.sklearn", "SklearnBackend", {"name": "logreg"}
-    ),
     "rf": _LazyBackend(
         "brood.models.sklearn", "SklearnBackend", {"name": "rf"}
     ),
@@ -52,9 +49,7 @@ MODEL_REGISTRY: dict[str, _LazyBackend] = {
         "brood.models.tabpfn", "TabPFNRegressionBackend", {}
     ),
     "chemprop": _LazyBackend("brood.models.chemprop", "ChempropBackend", {}),
-    "similarity": _LazyBackend(
-        "brood.models.similarity", "SimilarityBackend", {}
-    ),
+    "knn": _LazyBackend("brood.models.knn", "KNNBackend", {}),
 }
 
 
@@ -86,4 +81,4 @@ def get_model(name: str, **kwargs) -> "ModelBackend":
 
 def is_sklearn_model(name: str) -> bool:
     """Whether ``name`` is one of the fixed-representation sklearn learners."""
-    return name in ("logreg", "rf", "lgbm")
+    return name in ("rf", "lgbm")

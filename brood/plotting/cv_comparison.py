@@ -90,7 +90,7 @@ REPRESENTATION_LABELS = {
 _FACTORIAL_LEARNERS = ("tabpfn", "lgbm")
 
 #: Runs without a representation variant, drawn as reference lines in fig. 2.
-_REFERENCE_LEARNERS = ("chemprop", "similarity")
+_REFERENCE_LEARNERS = ("chemprop", "knn")
 
 #: Significance level for the pairwise comparisons.
 _ALPHA = 0.05
@@ -200,7 +200,7 @@ def _load_cv_metrics(
 def _split_model(name: str) -> tuple[str, str]:
     """'tabpfn_morgan512' -> ('tabpfn', 'morgan512').
 
-    Runs with no representation variant ('chemprop', 'similarity') map to
+    Runs with no representation variant ('chemprop', 'knn') map to
     their own model type with an empty representation, so they keep their
     model colour instead of falling back to the unknown-run grey.
     """

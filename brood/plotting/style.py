@@ -17,8 +17,7 @@ LEARNER_COLORS = {
     "tabpfn": _PALETTE[0],
     "rf": _PALETTE[1],
     "chemprop": _PALETTE[2],
-    "similarity": _PALETTE[7],
-    "logreg": _PALETTE[3],
+    "knn": _PALETTE[7],
     "lgbm": _PALETTE[4],
 }
 
@@ -26,8 +25,7 @@ LEARNER_LABELS = {
     "tabpfn": "TabPFN",
     "rf": "Random forest",
     "chemprop": "Chemprop",
-    "similarity": "Max-similarity",
-    "logreg": "Logistic regression",
+    "knn": "KNN",
     "lgbm": "LightGBM",
 }
 
