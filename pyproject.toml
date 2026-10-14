@@ -11,6 +11,9 @@ dependencies = [
     "numpy",
     "pandas",
     "scikit-learn",
+    "scipy",
+    "statsmodels",
+    "scikit-posthocs",
     "rdkit",
 ]
 

@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
 """Cross-validation figures for average precision.
 
-Reads per-fold metrics from ``data/runs/<dataset>/*/metrics/cv.csv`` and
+Reads per-sample metrics from ``data/runs/<dataset>/*/metrics/cv.csv`` and
 renders three figures:
 
 1. ``<dataset>_cv_ap.svg`` - every model's average precision, one faint dot
-   per CV fold, coloured by learner family, against the max-similarity
-   baseline. This is the screening leaderboard.
+   per CV sample, coloured by model. This is the screening
+   leaderboard. Each model's horizontal bar is its 95% simultaneous
+   confidence interval; the best model's interval is bounded by two dotted
+   vertical lines, so any model whose interval clears those lines is
+   significantly worse than the best.
 2. ``<dataset>_cv_representation.svg`` - average precision per molecular
    representation, for the later representation stage. Representations are
    nominal so nothing is connected across them; only the two learners at the
    same representation are joined, because that is a paired comparison.
 3. ``<dataset>_cv_representation_ap.svg`` - figure 1's leaderboard applied to
-   the representation runs, so every run is ranked in one place instead of
-   only being read off figure 2's pairs. Same function as figure 1 with a
-   different output name; it is a different run set, so its omnibus test and
-   Tukey half-width are its own.
+   the representation runs.
 
 Screening passes ``--skip-representation`` and gets figure 1 alone; the
 representation stage passes ``--skip-leaderboard`` and gets figures 2 and 3
 alone. Each stage must name only the figure it owns, otherwise it overwrites
 the other stage's figure with the wrong model set.
 
-Folds are treated as blocks, so the Tukey HSD intervals on figure 1 use the
-paired model-by-fold error term.
+Statistics follow Ash et al., *J. Chem. Inf. Model.* 2025, 65, 9398-9411
+("Practically Significant Method Comparison Protocols"): a repeated-measures
+ANOVA whose Error term is the sample-by-model interaction, followed by the
+Tukey HSD post hoc (``rm_tukey_hsd``). Each of the 5x5 CV samples is a
+subject, every model is measured on every sample. When the parametric
+assumptions are violated (non-normal residuals or non-spherical contrasts)
+the comparison falls back to Friedman + Conover-Holm; ``--test`` forces
+either path.
 
 ``--output-dir`` is the root figure directory: the dataset and ``cv`` are
 appended automatically, so pass ``figures``, not ``figures/<dataset>/cv``.
@@ -38,6 +44,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -46,9 +54,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scikit_posthocs as sp
 from matplotlib.lines import Line2D
 from scipy import stats
-from statsmodels.stats.libqsturng import qsturng
+from scipy.linalg import helmert
+from statsmodels.stats.libqsturng import psturng, qsturng
 
 from brood.core.logging import setup_logging
 from brood.plotting.style import (
@@ -75,14 +85,48 @@ REPRESENTATION_LABELS = {
     name: rep.label or name for name, rep in REPRESENTATION_REGISTRY.items()
 }
 
-#: Learners that have one run per representation and so get a line in fig. 2.
-_FACTORIAL_LEARNERS = ("tabpfn", "rf")
+#: Models that have one run per representation and so get a line in fig. 2.
+#: The first is the minuend of the figure's ``Δ`` label.
+_FACTORIAL_LEARNERS = ("tabpfn", "lgbm")
 
 #: Runs without a representation variant, drawn as reference lines in fig. 2.
 _REFERENCE_LEARNERS = ("chemprop", "similarity")
 
-#: Significance level for the blocked Tukey HSD intervals.
+#: Significance level for the pairwise comparisons.
 _ALPHA = 0.05
+
+#: Greenhouse-Geisser epsilon below which sphericity is treated as violated.
+_SPHERICITY_MIN = 0.75
+
+#: Shapiro p below which residual normality is treated as violated.
+_NORMALITY_MIN = 0.05
+
+
+@dataclass
+class Comparison:
+    """Within-subjects comparison of models across CV samples.
+
+    ``p_values`` is the symmetric matrix of adjusted pairwise p-values, so it
+    already accounts for every pairwise comparison in ``table``.
+    ``ci_half`` is the per-model simultaneous 95% interval half-width; it is
+    only defined for the parametric (Tukey) path.
+    """
+
+    means: pd.Series
+    p_values: pd.DataFrame
+    omnibus_p: float
+    test: str
+    alpha: float = _ALPHA
+    ci_half: float | None = None
+    reason: str = ""
+
+    def significant(self, a: str, b: str) -> bool:
+        """Whether two models differ at the chosen level."""
+        return bool(self.p_values.loc[a, b] < self.alpha)
+
+    def best(self) -> str:
+        """Name of the highest-mean model."""
+        return str(self.means.idxmax())
 
 
 def _parse_args() -> argparse.Namespace:
@@ -104,6 +148,16 @@ def _parse_args() -> argparse.Namespace:
         help="Only include these model run names in the comparison.",
     )
     parser.add_argument(
+        "--test",
+        choices=("auto", "parametric", "nonparametric"),
+        default="auto",
+        help=(
+            "Pairwise test: 'parametric' is repeated-measures Tukey HSD, "
+            "'nonparametric' is Friedman + Conover-Holm, 'auto' picks the "
+            "nonparametric fallback when the Tukey assumptions fail."
+        ),
+    )
+    parser.add_argument(
         "--skip-representation",
         action="store_true",
         help="Skip figures 2 and 3 (the representation-stage figures)",
@@ -119,11 +173,13 @@ def _parse_args() -> argparse.Namespace:
 def _load_cv_metrics(
     data_dir: Path, dataset: str, models: list[str] | None = None
 ) -> pd.DataFrame:
-    """Load per-fold CV metrics from each run's ``metrics/cv.csv``.
+    """Load per-sample CV metrics from each run's ``metrics/cv.csv``.
 
     These are the values :func:`brood.cv.loop.run_cv_model` already derived
     from the raw fold predictions, so the figures read one source instead of
-    recomputing AP/BEDROC/Brier a second time.
+    recomputing AP/BEDROC/Brier a second time. Repeated CV writes one row per
+    (repeat, fold); those are combined into a unique ``sample`` key so the
+    paired comparison treats all 5x5 samples as the blocking factor.
     """
     files = sorted((data_dir / "runs" / dataset).glob("*/metrics/cv.csv"))
     if models is not None:
@@ -133,15 +189,20 @@ def _load_cv_metrics(
         raise FileNotFoundError(
             f"No CV metrics CSVs found under {data_dir / 'runs' / dataset}"
         )
-    return pd.concat([pd.read_csv(path) for path in files], ignore_index=True)
+    df = pd.concat([pd.read_csv(path) for path in files], ignore_index=True)
+    if "repeat" in df.columns:
+        df["sample"] = df["repeat"].astype(str) + "_" + df["fold"].astype(str)
+    else:
+        df["sample"] = df["fold"].astype(str)
+    return df
 
 
 def _split_model(name: str) -> tuple[str, str]:
     """'tabpfn_morgan512' -> ('tabpfn', 'morgan512').
 
     Runs with no representation variant ('chemprop', 'similarity') map to
-    their own learner family with an empty representation, so they keep their
-    family colour instead of falling back to the unknown-run grey.
+    their own model type with an empty representation, so they keep their
+    model colour instead of falling back to the unknown-run grey.
     """
     learner, _, rep = name.partition("_")
     if learner in LEARNER_COLORS:
@@ -150,34 +211,34 @@ def _split_model(name: str) -> tuple[str, str]:
 
 
 def _fold_table(df: pd.DataFrame, metric: str) -> pd.DataFrame:
-    """Fold x model matrix of one metric (incomplete folds dropped)."""
+    """Sample x model matrix of one metric (incomplete samples dropped)."""
     table = (
         df.dropna(subset=[metric])
-        .pivot(index="fold", columns="model", values=metric)
+        .pivot(index="sample", columns="model", values=metric)
         .dropna()
     )
     if table.shape[0] < 2 or table.shape[1] < 2:
-        raise ValueError("Need at least 2 folds and 2 models")
+        raise ValueError("Need at least 2 samples and 2 models")
     return table
 
 
 def _warn_on_incomplete_folds(df: pd.DataFrame, table: pd.DataFrame) -> None:
-    """Name any run whose folds are incomplete.
+    """Name any run whose CV samples are incomplete.
 
-    A run with fewer folds than the rest forces ``dropna`` to discard those
-    folds for *every* model, silently shrinking the comparison.
+    A run with fewer samples than the rest forces ``dropna`` to discard those
+    samples for *every* model, silently shrinking the comparison.
     """
-    coverage = df.groupby("model")["fold"].nunique()
+    coverage = df.groupby("model")["sample"].nunique()
     expected = int(coverage.max())
     short = {model: int(n) for model, n in coverage.items() if n < expected}
-    dropped = sorted(set(df["fold"]) - set(table.index))
+    dropped = sorted(set(df["sample"]) - set(table.index))
     if short or dropped:
         detail = ", ".join(
             f"{m}={n}/{expected}" for m, n in sorted(short.items())
         )
         logger.warning(
-            "Paired comparison uses only {}/{} folds across {} models; "
-            "runs with incomplete folds: {}; folds dropped from every "
+            "Paired comparison uses only {}/{} samples across {} models; "
+            "runs with incomplete samples: {}; samples dropped from every "
             "model: {}. Re-run them before reading the figure.".format(
                 table.shape[0],
                 expected,
@@ -188,42 +249,182 @@ def _warn_on_incomplete_folds(df: pd.DataFrame, table: pd.DataFrame) -> None:
         )
 
 
-def _blocked_test(
-    table: pd.DataFrame, alpha: float = _ALPHA
-) -> tuple[pd.Series, float, float]:
-    """Blocked means, simultaneous Tukey half-width, and omnibus p-value.
+def rm_tukey_hsd(table: pd.DataFrame, alpha: float = _ALPHA) -> Comparison:
+    """Repeated-measures ANOVA with the Tukey HSD post hoc.
 
-    Each fold is a block shared by every model. The model-by-fold interaction
-    is the error term for the repeated-measures Tukey comparison. Taking a
-    sub-table (e.g. one representation's two learners) applies exactly the
-    same estimator to that subset.
+    Each CV sample is a subject and every model is measured on every sample,
+    so the Error term is the sample-by-model interaction. That Error mean
+    square and its degrees of freedom feed the studentized-range distribution
+    exactly as in Ash et al.'s ``rm_tukey_hsd``; the per-model ``ci_half`` is
+    the simultaneous 95% interval used by the leaderboard.
     """
-    n_folds, n_models = table.shape
-
+    n_samples, n_models = table.shape
     values = table.to_numpy()
-    model_means = table.mean(axis=0)
-    fold_means = table.mean(axis=1).to_numpy()
+    means = table.mean(axis=0)
+    row_means = values.mean(axis=1)
+    col_means = values.mean(axis=0)
     grand_mean = float(values.mean())
+    residual = values - row_means[:, None] - col_means[None, :] + grand_mean
+    error_df = (n_samples - 1) * (n_models - 1)
+    error_mse = float((residual**2).sum() / error_df)
+
+    columns = list(table.columns)
+    p_values = pd.DataFrame(
+        np.ones((n_models, n_models)), index=columns, columns=columns
+    )
+    if error_mse:
+        se = np.sqrt(2.0 * error_mse / n_samples)
+        for i, left in enumerate(columns):
+            for right in columns[i + 1 :]:
+                diff = float(means[left] - means[right])
+                q_stat = abs(diff) / se
+                p_val = float(
+                    np.atleast_1d(
+                        psturng(q_stat * np.sqrt(2.0), n_models, error_df)
+                    )[0]
+                )
+                p_val = min(max(p_val, 0.0), 1.0)
+                p_values.loc[left, right] = p_val
+                p_values.loc[right, left] = p_val
+
+    model_ss = n_samples * ((col_means - grand_mean) ** 2).sum()
+    model_mse = model_ss / (n_models - 1)
+    f_stat = model_mse / error_mse if error_mse else np.inf
+    omnibus_p = float(stats.f.sf(f_stat, n_models - 1, error_df))
+
+    critical = float(
+        np.atleast_1d(qsturng(1.0 - alpha, n_models, error_df))[0]
+    )
+    ci_half = critical / np.sqrt(2.0) * np.sqrt(error_mse / n_samples)
+    return Comparison(
+        means=means,
+        p_values=p_values,
+        omnibus_p=omnibus_p,
+        test="parametric",
+        alpha=alpha,
+        ci_half=float(ci_half),
+    )
+
+
+def friedman_conover(table: pd.DataFrame, alpha: float = _ALPHA) -> Comparison:
+    """Nonparametric fallback: Friedman omnibus + Conover pairwise (Holm).
+
+    Used when the Tukey assumptions fail. With two models the Friedman
+    omnibus is undefined and the paired Wilcoxon signed-rank test takes its
+    place; the post hoc Conover test still works at two groups.
+    """
+    columns = list(table.columns)
+    if len(columns) < 3:
+        omnibus_p = float(
+            stats.wilcoxon(table[columns[0]], table[columns[1]]).pvalue
+        )
+    else:
+        omnibus_p = float(
+            stats.friedmanchisquare(
+                *[table[c].to_numpy() for c in columns]
+            ).pvalue
+        )
+    with warnings.catch_warnings():
+        # A model with zero between-sample variance makes Conover's test
+        # divide by zero; the resulting p-value is still well defined.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        p_values = sp.posthoc_conover_friedman(table, p_adjust="holm")
+    p_values = p_values.reindex(index=columns, columns=columns).fillna(1.0)
+    return Comparison(
+        means=table.mean(axis=0),
+        p_values=p_values,
+        omnibus_p=omnibus_p,
+        test="nonparametric",
+        alpha=alpha,
+    )
+
+
+def _assumptions(table: pd.DataFrame) -> dict[str, float]:
+    """Shapiro normality of the residuals and Greenhouse-Geisser epsilon.
+
+    Normality is tested on the mean-centred residuals (the ANOVA error); the
+    epsilon measures how far the contrasts are from spherical (1.0 is
+    perfect). Both are only diagnostics - the caller decides what to do.
+    """
+    n_samples, n_models = table.shape
+    values = table.to_numpy()
     residual = (
         values
-        - fold_means[:, None]
-        - model_means.to_numpy()[None, :]
-        + grand_mean
+        - values.mean(axis=1)[:, None]
+        - values.mean(axis=0)[None, :]
+        + values.mean()
+    ).ravel()
+    normality_p = (
+        float(stats.shapiro(residual).pvalue) if residual.size >= 3 else 1.0
     )
-    error_df = (n_folds - 1) * (n_models - 1)
-    error_mse = float((residual**2).sum() / error_df)
-    critical = float(qsturng(1.0 - alpha, n_models, error_df))
-    half_width = critical * np.sqrt(error_mse / n_folds) / 2
 
-    model_ss = n_folds * ((model_means - grand_mean) ** 2).sum()
-    model_mse = model_ss / (n_models - 1)
-    omnibus_f = model_mse / error_mse if error_mse else np.inf
-    omnibus_p = float(stats.f.sf(omnibus_f, n_models - 1, error_df))
-    return model_means, float(half_width), omnibus_p
+    epsilon = 1.0
+    if n_models >= 2 and n_samples >= 2:
+        contrasts = helmert(n_models)
+        covariance = np.cov(values, rowvar=False)
+        within = contrasts @ covariance @ contrasts.T
+        denom = (n_models - 1) * np.trace(within @ within)
+        if denom:
+            epsilon = float(np.trace(within) ** 2 / denom)
+    return {"normality_p": normality_p, "gg_epsilon": epsilon}
+
+
+def _violations(diag: dict[str, float]) -> list[str]:
+    """Human-readable assumptions that the Tukey path would violate."""
+    reasons = []
+    if diag["gg_epsilon"] < _SPHERICITY_MIN:
+        reasons.append(
+            f"sphericity {diag['gg_epsilon']:.2f} < {_SPHERICITY_MIN}"
+        )
+    if diag["normality_p"] < _NORMALITY_MIN:
+        reasons.append(
+            f"normality p {diag['normality_p']:.3g} < {_NORMALITY_MIN}"
+        )
+    return reasons
+
+
+def _compare(
+    table: pd.DataFrame, mode: str
+) -> tuple[Comparison, dict[str, float]]:
+    """Run the chosen within-subjects comparison on a sample x model table."""
+    diag = _assumptions(table)
+    if mode == "auto":
+        reasons = _violations(diag)
+        chosen = "nonparametric" if reasons else "parametric"
+    else:
+        reasons = _violations(diag)
+        chosen = mode
+    if chosen == "nonparametric":
+        comparison = friedman_conover(table)
+        comparison.reason = "; ".join(reasons) or "forced"
+    else:
+        comparison = rm_tukey_hsd(table)
+    return comparison, diag
+
+
+def _log_comparison(comparison: Comparison, diag: dict[str, float]) -> None:
+    """Record the assumption checks and the test that was actually used."""
+    if comparison.test == "parametric":
+        logger.info(
+            "Tukey HSD: normality p={:.3g}, GG epsilon={:.3f}; "
+            "omnibus p={:.3g}".format(
+                diag["normality_p"], diag["gg_epsilon"], comparison.omnibus_p
+            )
+        )
+    else:
+        logger.warning(
+            "Nonparametric fallback ({}): normality p={:.3g}, GG "
+            "epsilon={:.3f}; omnibus p={:.3g}".format(
+                comparison.reason,
+                diag["normality_p"],
+                diag["gg_epsilon"],
+                comparison.omnibus_p,
+            )
+        )
 
 
 def _model_color(model: str) -> tuple:
-    """Colourblind-safe colour for a run's learner family."""
+    """Colourblind-safe colour for a model."""
     return LEARNER_COLORS.get(_split_model(model)[0], "#999999")
 
 
@@ -232,19 +433,21 @@ def _plot_leaderboard(
     dataset: str,
     output_dir: Path,
     metric: str,
+    table: pd.DataFrame,
+    comparison: Comparison,
     suffix: str | None = None,
 ) -> None:
-    """Figures 1 and 3: mean metric per run with one dot per CV fold.
+    """Figures 1 and 3: mean metric per run with one dot per CV sample.
 
-    Colour encodes the learner family. The bar through each mean is the
-    simultaneous Tukey HSD half-width, so intervals overlapping the leader's
-    are not significantly worse than it.
+    Colour encodes the model type. Each horizontal bar is the model's
+    simultaneous interval; the best model's interval is bounded by two dotted
+    lines, so a model outside them is significantly worse than the best.
     """
-    metric_df = df.dropna(subset=[metric])
-    table = _fold_table(metric_df, metric)
-    raw_means, half_width, omnibus_p = _blocked_test(table)
     _warn_on_incomplete_folds(df, table)
-    means = raw_means.sort_values(ascending=False)
+    means = comparison.means.sort_values(ascending=False)
+    best = comparison.best()
+    half = comparison.ci_half
+    tukey = half is not None
 
     fig, ax = plt.subplots(
         figsize=(10, 0.46 * len(means) + 2.0), constrained_layout=True
@@ -263,14 +466,15 @@ def _plot_leaderboard(
             zorder=3,
         )
         mean = means[model]
-        ax.plot(
-            [mean - half_width, mean + half_width],
-            [y, y],
-            color=color,
-            lw=1.6,
-            alpha=0.85,
-            zorder=4,
-        )
+        if half is not None:
+            ax.plot(
+                [mean - half, mean + half],
+                [y, y],
+                color=color,
+                lw=1.6,
+                alpha=0.85,
+                zorder=4,
+            )
         ax.plot(
             [mean, mean],
             [y - 0.28, y + 0.28],
@@ -279,14 +483,31 @@ def _plot_leaderboard(
             solid_capstyle="butt",
             zorder=5,
         )
+        flag = ""
+        if not tukey and model != best:
+            flag = " *" if comparison.significant(model, best) else " ns"
         ax.text(
             1.005,
             y,
-            f"{mean:.3f}",
+            f"{mean:.3f}{flag}",
             transform=ax.get_yaxis_transform(),
             va="center",
             fontsize=9,
             color="#444444",
+        )
+
+    if half is not None:
+        best_mean = float(means[best])
+        for bound in (best_mean - half, best_mean + half):
+            ax.axvline(bound, ls=":", color="#444444", lw=1.3, zorder=1)
+        ax.text(
+            best_mean + half,
+            -0.6,
+            " best 95% CI",
+            color="#444444",
+            fontsize=9,
+            va="center",
+            ha="left",
         )
 
     ax.text(
@@ -299,31 +520,22 @@ def _plot_leaderboard(
         color="#444444",
     )
 
-    baseline = [m for m in means.index if _split_model(m)[0] == "similarity"]
-    if baseline:
-        ref = means[baseline[0]]
-        ax.axvline(ref, ls="--", color=LEARNER_COLORS["similarity"], lw=1.4)
-        ax.text(
-            ref,
-            len(means) - 0.4,
-            " max-similarity",
-            color=LEARNER_COLORS["similarity"],
-            fontsize=9,
-            va="bottom",
-            ha="left",
-        )
-
     ax.set_yticks(range(len(means)), means.index)
     ax.set_ylim(len(means) - 0.4, -1.3)
     ax.tick_params(axis="y", length=0)
     decorate_axis(ax)
-    set_axes(
-        ax,
-        xlabel=(
-            f"Average precision per CV fold (dots), mean (vertical bar) and "
-            f"Tukey HSD interval (horizontal bar); n_folds={table.shape[0]}"
-        ),
-    )
+    if tukey:
+        xlabel = (
+            f"Average precision per CV sample (dots), mean (vertical bar) "
+            f"and 95% Tukey interval (horizontal bar); "
+            f"n_samples={table.shape[0]}"
+        )
+    else:
+        xlabel = (
+            f"Average precision per CV sample (dots), mean (vertical bar); "
+            f"* = worse than best (Conover-Holm); n_samples={table.shape[0]}"
+        )
+    set_axes(ax, xlabel=xlabel)
     present = sorted({_split_model(m)[0] for m in table.columns} - {"other"})
     ax.legend(
         handles=[
@@ -342,10 +554,16 @@ def _plot_leaderboard(
     # Same quantity as figure 1 but a different run set, and therefore a
     # different omnibus test: mark it so the two are not confused.
     scope = " (representation stage)" if suffix else ""
+    if tukey:
+        stat_line = (
+            f"repeated-measures ANOVA + Tukey HSD, omnibus F-test "
+            f"p={comparison.omnibus_p:.2g}"
+        )
+    else:
+        stat_line = f"Friedman + Conover-Holm, p={comparison.omnibus_p:.2g}"
     ax.set_title(
-        f"{dataset}: development-set 5-fold cross-validation "
-        f"average precision{scope}\n"
-        f"omnibus F-test on blocked means, p={omnibus_p:.2g}, α={_ALPHA}",
+        f"{dataset}: training-set repeated 5x5 CV "
+        f"average precision{scope}\n{stat_line}, α={comparison.alpha}",
         fontsize=12,
     )
     path = output_dir / f"{dataset}_cv_{suffix or metric}.svg"
@@ -358,19 +576,18 @@ def _plot_representation(
     dataset: str,
     output_dir: Path,
     metric: str,
+    table: pd.DataFrame,
+    comparison: Comparison,
 ) -> None:
     """Figure 2: metric per representation, paired within each group.
 
     Representations are nominal, so nothing is connected across them. The
     two learners at the same representation are joined by a segment because
-    that *is* a paired comparison, and its length is the learner effect. Each
-    segment carries the paired difference and is drawn solid only when it
-    exceeds the blocked Tukey half-width for that same pair.
+    that *is* a paired comparison; the segment is drawn solid only when the
+    pairwise adjusted p-value is significant.
     """
-    metric_df = df.dropna(subset=[metric])
-    table = _fold_table(metric_df, metric)
     _warn_on_incomplete_folds(df, table)
-    means = table.mean(axis=0)
+    means = comparison.means
 
     pairs: dict[str, tuple[str, str]] = {}
     for rep in REPRESENTATION_ORDER:
@@ -394,10 +611,9 @@ def _plot_representation(
 
     for x, rep in zip(xs, reps):
         left, right = pairs[rep]
-        _, half_width, _ = _blocked_test(table[[left, right]])
         lo, hi = float(means[left]), float(means[right])
         color = LEARNER_COLORS[_split_model(left)[0]]
-        significant = abs(hi - lo) > 2 * half_width
+        significant = comparison.significant(left, right)
         n_tied += not significant
         ax.plot(
             [x, x],
@@ -460,18 +676,25 @@ def _plot_representation(
     ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1.01, 0.5))
 
     decorate_axis(ax)
+    test_name = (
+        "Tukey HSD" if comparison.test == "parametric" else "Conover-Holm"
+    )
     set_axes(
         ax,
         ylabel="Average precision",
-        xlabel="Molecular representation (segment labelled Δ = TabPFN − RF)",
+        xlabel=(
+            "Molecular representation (segment labelled "
+            f"Δ = {LEARNER_LABELS[_FACTORIAL_LEARNERS[0]]} − "
+            f"{LEARNER_LABELS[_FACTORIAL_LEARNERS[1]]})"
+        ),
     )
     ax.set_xticks(xs, [REPRESENTATION_LABELS.get(rep, rep) for rep in reps])
     ax.set_xlim(-0.4, len(reps) - 0.6)
     ax.set_title(
-        f"{dataset}: representation and learner, paired within each "
-        f"group\n{metric.upper()}, n_folds={table.shape[0]}, "
+        f"{dataset}: representation and model, paired within each "
+        f"group\n{metric.upper()}, {test_name}, n_samples={table.shape[0]}, "
         f"{len(reps) - n_tied}/{len(reps)} gaps distinguishable at "
-        f"α={_ALPHA}",
+        f"α={comparison.alpha}",
         fontsize=12,
     )
     path = output_dir / f"{dataset}_cv_representation.svg"
@@ -486,16 +709,26 @@ def main() -> None:
     df = _load_cv_metrics(Path(args.data_dir), args.dataset, args.models)
     if "ap" not in df.columns:
         raise ValueError("No average precision available in the CV files")
+    metric = "ap"
+    table = _fold_table(df.dropna(subset=[metric]), metric)
+    comparison, diag = _compare(table, args.test)
+    _log_comparison(comparison, diag)
     output_dir = Path(args.output_dir or "figures") / args.dataset / "cv"
     if not args.skip_leaderboard:
-        _plot_leaderboard(df, args.dataset, output_dir, "ap")
+        _plot_leaderboard(
+            df, args.dataset, output_dir, metric, table, comparison
+        )
     if not args.skip_representation:
-        _plot_representation(df, args.dataset, output_dir, "ap")
+        _plot_representation(
+            df, args.dataset, output_dir, metric, table, comparison
+        )
         _plot_leaderboard(
             df,
             args.dataset,
             output_dir,
-            "ap",
+            metric,
+            table,
+            comparison,
             suffix="representation_ap",
         )
 
