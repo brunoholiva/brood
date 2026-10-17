@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from brood.models.knn import _nearest_neighbors, _tune
+from brood.models.knn import _nearest_neighbors, _score_neighbors, _tune
 from brood.models.registry import get_model
 from brood.models.sklearn import learner_by_name
 
@@ -48,6 +48,18 @@ def test_knn_predicts_probabilities_from_both_classes():
 
     assert len(preds) == 1
     assert 0 <= preds.iloc[0]["predicted_probability"] <= 1
+
+
+def test_knn_distance_scores_stay_within_probability_bounds():
+    scores = _score_neighbors(
+        np.array([1, 1, 1]),
+        np.array([[0, 1, 2]]),
+        np.array([[0.99999994, 0.9999999, 0.5]], dtype=np.float32),
+        3,
+        "distance",
+    )
+
+    assert np.all((scores >= 0) & (scores <= 1))
 
 
 def test_knn_neighbor_cache_is_reused(tmp_path):

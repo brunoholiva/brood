@@ -155,7 +155,7 @@ def _score_neighbors(
         scores[~has_exact_match] = (
             neighbor_labels[~has_exact_match] * weights_array
         ).sum(axis=1) / weights_array.sum(axis=1)
-    return scores
+    return np.clip(scores, 0.0, 1.0)
 
 
 def _tune(
