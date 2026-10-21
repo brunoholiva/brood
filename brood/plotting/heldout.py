@@ -21,7 +21,12 @@ import pandas as pd
 from sklearn.metrics import average_precision_score, precision_recall_curve
 
 from brood.plotting.style import (
+    FONTSIZE_SMALL,
+    FONTSIZE_TITLE,
+    LEARNER_COLORS,
     decorate_axis,
+    run_label,
+    run_learner,
     save_fig,
     set_axes,
     use_style,
@@ -51,6 +56,20 @@ _CURVE_COLORS = (
 def run_color(index: int) -> str:
     """Stable colour for the *index*-th run in a multi-run panel."""
     return _CURVE_COLORS[index % len(_CURVE_COLORS)]
+
+
+def curve_colors(runs: list[str]) -> list[str]:
+    """Colours for a panel of runs, one per run.
+
+    Runs are coloured by model, so the same model keeps the same colour in
+    every figure. A panel whose runs share a model, or that holds an
+    unknown model, falls back to the positional palette: two curves in one
+    panel must never get the same colour.
+    """
+    learners = [run_learner(run) for run in runs]
+    if len(set(learners)) < len(learners) or "other" in learners:
+        return [run_color(index) for index in range(len(runs))]
+    return [LEARNER_COLORS[learner] for learner in learners]
 
 
 def plot_pr_curves(
@@ -89,8 +108,9 @@ def plot_pr_curves(
     ValueError
         If no run has both scores and actives.
     """
-    fig, ax = plt.subplots(figsize=(7.2, 5.4), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(8, 5.8), constrained_layout=True)
 
+    colors = curve_colors(list(score_cols))
     drawn = 0
     for index, (run, col) in enumerate(score_cols.items()):
         usable = merged[merged[col].notna() & merged[label_col].notna()]
@@ -108,9 +128,9 @@ def plot_pr_curves(
         ax.plot(
             recall,
             precision,
-            color=run_color(index),
+            color=colors[index],
             lw=2.0,
-            label=f"{run}  AP={ap:.3f} (n={len(usable)})",
+            label=f"{run_label(run)}  AP={ap:.3f} (n={len(usable)})",
         )
         drawn += 1
 
@@ -133,12 +153,8 @@ def plot_pr_curves(
 
     decorate_axis(ax)
     set_axes(ax, xlim=(0, 1), ylim=(0, 1), xlabel="Recall", ylabel="Precision")
-    ax.legend(loc="lower left", fontsize=9)
-    ax.set_title(
-        f"{dataset}: held-out precision-recall\n"
-        "dashed line is the active prevalence",
-        fontsize=12,
-    )
+    ax.legend(loc="lower left", fontsize=FONTSIZE_SMALL)
+    ax.set_title(dataset, fontsize=FONTSIZE_TITLE)
 
     path = Path(output_dir) / f"{dataset}_heldout_pr.svg"
     save_fig(fig, path)
@@ -184,7 +200,7 @@ def plot_distance_vs_probability(
     if frame.empty:
         raise ValueError(f"{run}: no complete held-out rows to plot")
 
-    fig, ax = plt.subplots(figsize=(7.2, 5.0), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(8, 5.2), constrained_layout=True)
     is_active = frame[label_col].to_numpy() == 1
     x = frame[distance_col].to_numpy()
     y = frame[score_col].to_numpy()
@@ -218,8 +234,8 @@ def plot_distance_vs_probability(
         xlabel="Distance to training set (mean 5-NN Tanimoto)",
         ylabel="Predicted probability",
     )
-    ax.legend(loc="upper right", fontsize=9)
-    ax.set_title(f"{run}: held-out predictions", fontsize=12)
+    ax.legend(loc="upper right", fontsize=FONTSIZE_SMALL)
+    ax.set_title(run_label(run), fontsize=FONTSIZE_TITLE)
 
     path = Path(output_dir) / f"{run}_distance_vs_probability.svg"
     save_fig(fig, path)

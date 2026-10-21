@@ -20,7 +20,14 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 
-from brood.plotting.style import decorate_axis, save_fig, set_axes, use_style
+from brood.plotting.style import (
+    FONTSIZE_SMALL,
+    FONTSIZE_TITLE,
+    decorate_axis,
+    save_fig,
+    set_axes,
+    use_style,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +90,7 @@ def plot_cv_class_balance(
         overall,
         f" overall {overall:.1%}",
         color=_REFERENCE_COLOR,
-        fontsize=9,
+        fontsize=FONTSIZE_SMALL,
         va="bottom",
         ha="right",
     )
@@ -94,7 +101,7 @@ def plot_cv_class_balance(
             f"n={int(total)}\n{fraction:.0%}",
             ha="center",
             va="bottom",
-            fontsize=7,
+            fontsize=10,
             color="#444444",
         )
 
@@ -103,18 +110,12 @@ def plot_cv_class_balance(
     ax.set_yticks(np.linspace(0, 1, 6))
     ax.set_yticklabels([f"{value:.0%}" for value in np.linspace(0, 1, 6)])
     decorate_axis(ax)
-    n_repeats = int(df["repeat"].nunique())
-    n_folds = int(df["fold"].nunique())
     set_axes(
         ax,
         xlabel="CV fold (repeat × fold)",
         ylabel="Class fraction",
     )
-    ax.set_title(
-        f"{dataset}: repeated {n_repeats}×{n_folds} CV class balance\n"
-        f"active fraction per fold vs overall {overall:.1%}",
-        fontsize=12,
-    )
+    ax.set_title(dataset, fontsize=FONTSIZE_TITLE)
     ax.legend(
         handles=[
             Line2D([0], [0], color=_ACTIVE_COLOR, lw=8, label="active"),
