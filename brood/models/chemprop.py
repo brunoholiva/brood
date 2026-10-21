@@ -347,8 +347,9 @@ class ChempropBackend(ModelBackend):
         random_state: int,
     ) -> dict[str, Any]:
         """Tune Chemprop on one training slice with tuning CV."""
+        folds = _build_folds(train_df)
         tuned = run_optuna_tuning(
-            lambda trial: _objective(trial, _build_folds(train_df)),
+            lambda trial: _objective(trial, folds),
             dataset,
             model_name=self.name,
             n_trials=n_trials,
@@ -372,8 +373,9 @@ class ChempropBackend(ModelBackend):
             dataset,
             require_scaffold=True,
         )
+        folds = _build_folds(train_df)
         tuned = run_optuna_tuning(
-            lambda trial: _objective(trial, _build_folds(train_df)),
+            lambda trial: _objective(trial, folds),
             dataset,
             model_name=self.name,
             n_trials=n_trials,
