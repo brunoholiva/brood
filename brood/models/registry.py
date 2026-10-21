@@ -44,6 +44,9 @@ MODEL_REGISTRY: dict[str, _LazyBackend] = {
     "lgbm": _LazyBackend(
         "brood.models.sklearn", "SklearnBackend", {"name": "lgbm"}
     ),
+    "mlp": _LazyBackend(
+        "brood.models.sklearn", "SklearnBackend", {"name": "mlp"}
+    ),
     "tabpfn": _LazyBackend("brood.models.tabpfn", "TabPFNBackend", {}),
     "tabpfn_regression": _LazyBackend(
         "brood.models.tabpfn", "TabPFNRegressionBackend", {}
@@ -81,4 +84,4 @@ def get_model(name: str, **kwargs) -> "ModelBackend":
 
 def is_sklearn_model(name: str) -> bool:
     """Whether ``name`` is one of the fixed-representation sklearn learners."""
-    return name in ("rf", "lgbm")
+    return name in ("rf", "lgbm", "mlp")

@@ -20,6 +20,7 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedGroupKFold, cross_val_score
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 
 from brood.core.artifacts import run_dir
@@ -88,6 +89,33 @@ def _lgbm_space(trial, n_features: int) -> dict:
         ),
     }
 
+_MLP_HIDDEN_LAYERS = {
+    "128": (128,),
+    "256": (256,),
+    "512": (512,),
+    "256x128": (256, 128),
+    "512x256": (512, 256),
+    "256x256x128": (256, 256, 128),
+    "512x256x128": (512, 256, 128),
+}
+
+
+def _mlp_space(trial, n_features: int) -> dict:
+    hidden_key = trial.suggest_categorical(
+        "mlp__hidden_layer_profile",
+        list(_MLP_HIDDEN_LAYERS),
+    )
+    return {
+        "mlp__hidden_layer_sizes": _MLP_HIDDEN_LAYERS[hidden_key],
+        "mlp__alpha": trial.suggest_float("mlp__alpha", 1e-6, 1e-2, log=True),
+        "mlp__learning_rate_init": trial.suggest_float(
+            "mlp__learning_rate_init", 1e-4, 5e-2, log=True
+        ),
+        "mlp__learning_rate": trial.suggest_categorical(
+            "mlp__learning_rate", ["constant", "adaptive"]
+        ),
+    }
+
 
 def _screening_learners() -> list[Learner]:
     """Return the fixed-representation learners available in this env."""
@@ -119,6 +147,18 @@ def _screening_learners() -> list[Learner]:
                 search_space=_lgbm_space,
             )
         )
+    learners.append(
+        Learner(
+            name="mlp",
+            estimator=MLPClassifier(
+                early_stopping=True,
+                max_iter=400,
+                n_iter_no_change=20,
+                random_state=42,
+            ),
+            search_space=_mlp_space,
+        )
+    )
     return learners
 
 
@@ -208,7 +248,7 @@ def tune_learner(
 
 
 class SklearnBackend(ModelBackend):
-    """Backend for random forest and LightGBM."""
+    """Backend for fixed-representation sklearn learners."""
 
     supports_tuning = True
     needs_features = True
@@ -233,6 +273,11 @@ class SklearnBackend(ModelBackend):
             "lgbm__learning_rate": 0.05,
             "lgbm__num_leaves": 31,
             "lgbm__min_child_samples": 20,
+            "mlp__hidden_layer_sizes": (256,),
+            "mlp__alpha": 1e-4,
+            "mlp__learning_rate_init": 1e-3,
+            "mlp__learning_rate": "adaptive",
+            "mlp__batch_size": 256,
         }
         return {k: v for k, v in defaults.items() if k.startswith(self.name)}
 
