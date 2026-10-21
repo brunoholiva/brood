@@ -17,9 +17,9 @@ from matplotlib import rcParams
 from brood.models.registry import MODEL_REGISTRY
 from brood.representations import REPRESENTATION_REGISTRY
 
-FONTSIZE = 18
+FONTSIZE = 14
 
-FONTSIZE_SMALL = 14
+FONTSIZE_SMALL = 10
 
 FONTSIZE_TITLE = 20
 

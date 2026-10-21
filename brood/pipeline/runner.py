@@ -493,7 +493,7 @@ def run_dataset(
                 f"[{name} plot] need at least 2 models for leaderboard"
             )
         else:
-            svg = cv_figures_dir / f"{name}_cv_ap.svg"
+            svg = cv_figures_dir / f"{name}_screening_ap.svg"
             if force or not svg.exists() or _stale(svg, leaderboard_inputs):
                 cmd = _plot_cmd(plot_models)
                 if repr_plot_models is None:
@@ -516,8 +516,8 @@ def run_dataset(
             # This stage writes both representation figures, so both must be
             # present and fresh before it is skipped.
             repr_svgs = [
-                cv_figures_dir / f"{name}_cv_representation.svg",
-                cv_figures_dir / f"{name}_cv_representation_ap.svg",
+                cv_figures_dir / f"{name}_representation_comparison.svg",
+                cv_figures_dir / f"{name}_representation_ap.svg",
             ]
             if (
                 force
